@@ -25,7 +25,6 @@
 #include "node.h"
 #include "node_crypto_clienthello.h"  // ClientHelloParser
 #include "node_crypto_clienthello-inl.h"
-#include "node_object_wrap.h"
 
 #ifdef OPENSSL_NPN_NEGOTIATED
 #include "node_buffer.h"
@@ -434,10 +433,11 @@ class Sign : public WeakObject {
 
   void SignInit(const char* sign_type);
   bool SignUpdate(const char* data, int len);
-  bool SignFinal(unsigned char** md_value,
-                 unsigned int *md_len,
-                 const char* key_pem,
-                 int key_pem_len);
+  bool SignFinal(const char* key_pem,
+                 int key_pem_len,
+                 const char* passphrase,
+                 unsigned char** sig,
+                 unsigned int *sig_len);
 
  protected:
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
