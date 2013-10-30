@@ -21,6 +21,8 @@
 
 #include "env.h"
 #include "env-inl.h"
+#include "util.h"
+#include "util-inl.h"
 #include "node.h"
 #include "handle_wrap.h"
 
@@ -98,8 +100,7 @@ void FSEventWrap::New(const FunctionCallbackInfo<Value>& args) {
 void FSEventWrap::Start(const FunctionCallbackInfo<Value>& args) {
   HandleScope scope(node_isolate);
 
-  FSEventWrap* wrap;
-  NODE_UNWRAP(args.This(), FSEventWrap, wrap);
+  FSEventWrap* wrap = Unwrap<FSEventWrap>(args.This());
 
   if (args.Length() < 1 || !args[0]->IsString()) {
     return ThrowTypeError("Bad arguments");
@@ -107,17 +108,21 @@ void FSEventWrap::Start(const FunctionCallbackInfo<Value>& args) {
 
   String::Utf8Value path(args[0]);
 
-  int err = uv_fs_event_init(wrap->env()->event_loop(),
-                             &wrap->handle_,
-                             *path,
-                             OnEvent,
-                             0);
+  int err = uv_fs_event_init(wrap->env()->event_loop(), &wrap->handle_);
+
   if (err == 0) {
-    // Check for persistent argument
-    if (!args[1]->IsTrue()) {
-      uv_unref(reinterpret_cast<uv_handle_t*>(&wrap->handle_));
-    }
     wrap->initialized_ = true;
+
+    err = uv_fs_event_start(&wrap->handle_, OnEvent, *path, 0);
+
+    if (err == 0) {
+      // Check for persistent argument
+      if (!args[1]->IsTrue()) {
+        uv_unref(reinterpret_cast<uv_handle_t*>(&wrap->handle_));
+      }
+    } else {
+      FSEventWrap::Close(args);
+    }
   }
 
   args.GetReturnValue().Set(err);
@@ -178,8 +183,7 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
 void FSEventWrap::Close(const FunctionCallbackInfo<Value>& args) {
   HandleScope scope(node_isolate);
 
-  FSEventWrap* wrap;
-  NODE_UNWRAP_NO_ABORT(args.This(), FSEventWrap, wrap);
+  FSEventWrap* wrap = Unwrap<FSEventWrap>(args.This());
 
   if (wrap == NULL || wrap->initialized_ == false)
     return;
