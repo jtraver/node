@@ -22,12 +22,12 @@
 #include "node.h"
 #include "node_buffer.h"
 
+#include "async-wrap.h"
+#include "async-wrap-inl.h"
 #include "env.h"
 #include "env-inl.h"
 #include "util.h"
 #include "util-inl.h"
-#include "weak-object.h"
-#include "weak-object-inl.h"
 
 #include "v8.h"
 #include "zlib.h"
@@ -69,11 +69,11 @@ void InitZlib(v8::Handle<v8::Object> target);
 /**
  * Deflate/Inflate
  */
-class ZCtx : public WeakObject {
+class ZCtx : public AsyncWrap {
  public:
 
   ZCtx(Environment* env, Local<Object> wrap, node_zlib_mode mode)
-      : WeakObject(env, wrap),
+      : AsyncWrap(env, wrap),
         chunk_size_(0),
         dictionary_(NULL),
         dictionary_len_(0),
@@ -87,6 +87,7 @@ class ZCtx : public WeakObject {
         windowBits_(0),
         write_in_progress_(false),
         refs_(0) {
+    MakeWeak<ZCtx>(this);
   }
 
 
@@ -255,8 +256,8 @@ class ZCtx : public WeakObject {
     ZCtx* ctx = CONTAINER_OF(work_req, ZCtx, work_req_);
     Environment* env = ctx->env();
 
-    Context::Scope context_scope(env->context());
     HandleScope handle_scope(env->isolate());
+    Context::Scope context_scope(env->context());
 
     // Acceptable error states depend on the type of zlib stream.
     switch (ctx->err_) {
@@ -313,8 +314,8 @@ class ZCtx : public WeakObject {
   }
 
   static void New(const FunctionCallbackInfo<Value>& args) {
-    Environment* env = Environment::GetCurrent(args.GetIsolate());
     HandleScope handle_scope(args.GetIsolate());
+    Environment* env = Environment::GetCurrent(args.GetIsolate());
 
     if (args.Length() < 1 || !args[0]->IsInt32()) {
       return ThrowTypeError("Bad argument");
@@ -522,7 +523,7 @@ class ZCtx : public WeakObject {
   void Unref() {
     assert(refs_ > 0);
     if (--refs_ == 0) {
-      MakeWeak();
+      MakeWeak<ZCtx>(this);
     }
   }
 
