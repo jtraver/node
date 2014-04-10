@@ -89,8 +89,6 @@ const char* IntelDoubleRegister::AllocationIndexToString(int index) {
 }
 
 
-// The Probe method needs executable memory, so it uses Heap::CreateCode.
-// Allocation failure is silent and leads to safe default.
 void CpuFeatures::Probe() {
   ASSERT(!initialized_);
   ASSERT(supported_ == 0);
@@ -159,6 +157,11 @@ bool RelocInfo::IsCodedSpecially() {
   // branch instructions.  These are also the ones that need changing when a
   // code object moves.
   return (1 << rmode_) & kApplyMask;
+}
+
+
+bool RelocInfo::IsInConstantPool() {
+  return false;
 }
 
 
@@ -550,6 +553,16 @@ void Assembler::mov_w(const Operand& dst, Register src) {
   EMIT(0x66);
   EMIT(0x89);
   emit_operand(src, dst);
+}
+
+
+void Assembler::mov_w(const Operand& dst, int16_t imm16) {
+  EnsureSpace ensure_space(this);
+  EMIT(0x66);
+  EMIT(0xC7);
+  emit_operand(eax, dst);
+  EMIT(static_cast<int8_t>(imm16 & 0xff));
+  EMIT(static_cast<int8_t>(imm16 >> 8));
 }
 
 
@@ -1248,6 +1261,14 @@ void Assembler::bts(const Operand& dst, Register src) {
   EMIT(0x0F);
   EMIT(0xAB);
   emit_operand(src, dst);
+}
+
+
+void Assembler::bsr(Register dst, const Operand& src) {
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0xBD);
+  emit_operand(dst, src);
 }
 
 
@@ -2059,10 +2080,65 @@ void Assembler::xorpd(XMMRegister dst, XMMRegister src) {
 }
 
 
-void Assembler::xorps(XMMRegister dst, XMMRegister src) {
+void Assembler::andps(XMMRegister dst, const Operand& src) {
+  ASSERT(IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0x54);
+  emit_sse_operand(dst, src);
+}
+
+
+void Assembler::orps(XMMRegister dst, const Operand& src) {
+  ASSERT(IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0x56);
+  emit_sse_operand(dst, src);
+}
+
+
+void Assembler::xorps(XMMRegister dst, const Operand& src) {
+  ASSERT(IsEnabled(SSE2));
   EnsureSpace ensure_space(this);
   EMIT(0x0F);
   EMIT(0x57);
+  emit_sse_operand(dst, src);
+}
+
+
+void Assembler::addps(XMMRegister dst, const Operand& src) {
+  ASSERT(IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0x58);
+  emit_sse_operand(dst, src);
+}
+
+
+void Assembler::subps(XMMRegister dst, const Operand& src) {
+  ASSERT(IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0x5C);
+  emit_sse_operand(dst, src);
+}
+
+
+void Assembler::mulps(XMMRegister dst, const Operand& src) {
+  ASSERT(IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0x59);
+  emit_sse_operand(dst, src);
+}
+
+
+void Assembler::divps(XMMRegister dst, const Operand& src) {
+  ASSERT(IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0x5E);
   emit_sse_operand(dst, src);
 }
 
@@ -2093,16 +2169,6 @@ void Assembler::orpd(XMMRegister dst, XMMRegister src) {
   EMIT(0x66);
   EMIT(0x0F);
   EMIT(0x56);
-  emit_sse_operand(dst, src);
-}
-
-
-void Assembler::ucomisd(XMMRegister dst, XMMRegister src) {
-  ASSERT(IsEnabled(SSE2));
-  EnsureSpace ensure_space(this);
-  EMIT(0x66);
-  EMIT(0x0F);
-  EMIT(0x2E);
   emit_sse_operand(dst, src);
 }
 
@@ -2176,6 +2242,17 @@ void Assembler::movaps(XMMRegister dst, XMMRegister src) {
   EMIT(0x0F);
   EMIT(0x28);
   emit_sse_operand(dst, src);
+}
+
+
+void Assembler::shufps(XMMRegister dst, XMMRegister src, byte imm8) {
+  ASSERT(IsEnabled(SSE2));
+  ASSERT(is_uint8(imm8));
+  EnsureSpace ensure_space(this);
+  EMIT(0x0F);
+  EMIT(0xC6);
+  emit_sse_operand(dst, src);
+  EMIT(imm8);
 }
 
 
@@ -2271,16 +2348,6 @@ void Assembler::movsd(XMMRegister dst, const Operand& src) {
 }
 
 
-void Assembler::movsd(XMMRegister dst, XMMRegister src) {
-  ASSERT(IsEnabled(SSE2));
-  EnsureSpace ensure_space(this);
-  EMIT(0xF2);
-  EMIT(0x0F);
-  EMIT(0x10);
-  emit_sse_operand(dst, src);
-}
-
-
 void Assembler::movss(const Operand& dst, XMMRegister src ) {
   ASSERT(IsEnabled(SSE2));
   EnsureSpace ensure_space(this);
@@ -2297,16 +2364,6 @@ void Assembler::movss(XMMRegister dst, const Operand& src) {
   EMIT(0xF3);  // float
   EMIT(0x0F);
   EMIT(0x10);  // load
-  emit_sse_operand(dst, src);
-}
-
-
-void Assembler::movss(XMMRegister dst, XMMRegister src) {
-  ASSERT(IsEnabled(SSE2));
-  EnsureSpace ensure_space(this);
-  EMIT(0xF3);
-  EMIT(0x0F);
-  EMIT(0x10);
   emit_sse_operand(dst, src);
 }
 
@@ -2341,14 +2398,6 @@ void Assembler::extractps(Register dst, XMMRegister src, byte imm8) {
   EMIT(0x17);
   emit_sse_operand(src, dst);
   EMIT(imm8);
-}
-
-
-void Assembler::andps(XMMRegister dst, XMMRegister src) {
-  EnsureSpace ensure_space(this);
-  EMIT(0x0F);
-  EMIT(0x54);
-  emit_sse_operand(dst, src);
 }
 
 
@@ -2519,7 +2568,7 @@ void Assembler::RecordComment(const char* msg, bool force) {
 
 
 void Assembler::GrowBuffer() {
-  ASSERT(overflow());
+  ASSERT(buffer_overflow());
   if (!own_buffer_) FATAL("external code buffer is too small");
 
   // Compute new buffer size.
@@ -2578,7 +2627,7 @@ void Assembler::GrowBuffer() {
     }
   }
 
-  ASSERT(!overflow());
+  ASSERT(!buffer_overflow());
 }
 
 
@@ -2665,6 +2714,19 @@ void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
   }
   RelocInfo rinfo(pc_, rmode, data, NULL);
   reloc_info_writer.Write(&rinfo);
+}
+
+
+MaybeObject* Assembler::AllocateConstantPool(Heap* heap) {
+  // No out-of-line constant pool support.
+  UNREACHABLE();
+  return NULL;
+}
+
+
+void Assembler::PopulateConstantPool(ConstantPoolArray* constant_pool) {
+  // No out-of-line constant pool support.
+  UNREACHABLE();
 }
 
 

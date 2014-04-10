@@ -44,7 +44,7 @@ class Factory {
       Handle<Object> value,
       PretenureFlag pretenure = NOT_TENURED);
 
-  // Allocate a new uninitialized fixed array.
+  // Allocates a fixed array initialized with undefined values.
   Handle<FixedArray> NewFixedArray(
       int size,
       PretenureFlag pretenure = NOT_TENURED);
@@ -54,6 +54,9 @@ class Factory {
       int size,
       PretenureFlag pretenure = NOT_TENURED);
 
+  // Allocates an uninitialized fixed array. It must be filled by the caller.
+  Handle<FixedArray> NewUninitializedFixedArray(int size);
+
   // Allocate a new uninitialized fixed double array.
   Handle<FixedDoubleArray> NewFixedDoubleArray(
       int size,
@@ -61,7 +64,8 @@ class Factory {
 
   Handle<ConstantPoolArray> NewConstantPoolArray(
       int number_of_int64_entries,
-      int number_of_ptr_entries,
+      int number_of_code_ptr_entries,
+      int number_of_heap_ptr_entries,
       int number_of_int32_entries);
 
   Handle<SeededNumberDictionary> NewSeededNumberDictionary(
@@ -74,7 +78,9 @@ class Factory {
 
   Handle<ObjectHashSet> NewObjectHashSet(int at_least_space_for);
 
-  Handle<ObjectHashTable> NewObjectHashTable(int at_least_space_for);
+  Handle<ObjectHashTable> NewObjectHashTable(
+      int at_least_space_for,
+      MinimumCapacity capacity_option = USE_DEFAULT_MINIMUM_CAPACITY);
 
   Handle<WeakHashTable> NewWeakHashTable(int at_least_space_for);
 
@@ -97,10 +103,13 @@ class Factory {
   }
   Handle<String> InternalizeString(Handle<String> str);
   Handle<String> InternalizeOneByteString(Vector<const uint8_t> str);
-  Handle<String> InternalizeOneByteString(Handle<SeqOneByteString>,
-                                   int from,
-                                   int length);
+  Handle<String> InternalizeOneByteString(
+      Handle<SeqOneByteString>, int from, int length);
+
   Handle<String> InternalizeTwoByteString(Vector<const uc16> str);
+
+  template<class StringTableKey>
+  Handle<String> InternalizeStringWithKey(StringTableKey* key);
 
 
   // String creation functions.  Most of the string creation functions take
@@ -156,22 +165,27 @@ class Factory {
       PretenureFlag pretenure = NOT_TENURED);
 
   // Create a new cons string object which consists of a pair of strings.
-  Handle<String> NewConsString(Handle<String> first,
-                               Handle<String> second);
+  Handle<String> NewConsString(Handle<String> left,
+                               Handle<String> right);
+
+  Handle<ConsString> NewRawConsString(String::Encoding encoding);
 
   // Create a new sequential string containing the concatenation of the inputs.
   Handle<String> NewFlatConcatString(Handle<String> first,
                                      Handle<String> second);
 
-  // Create a new string object which holds a substring of a string.
-  Handle<String> NewSubString(Handle<String> str,
-                              int begin,
-                              int end);
-
   // Create a new string object which holds a proper substring of a string.
   Handle<String> NewProperSubString(Handle<String> str,
                                     int begin,
                                     int end);
+
+  // Create a new string object which holds a substring of a string.
+  Handle<String> NewSubString(Handle<String> str, int begin, int end) {
+    if (begin == 0 && end == str->length()) return str;
+    return NewProperSubString(str, begin, end);
+  }
+
+  Handle<SlicedString> NewRawSlicedString(String::Encoding encoding);
 
   // Creates a new external String object.  There are two String encodings
   // in the system: ASCII and two byte.  Unlike other String types, it does
@@ -184,6 +198,7 @@ class Factory {
 
   // Create a symbol.
   Handle<Symbol> NewSymbol();
+  Handle<Symbol> NewPrivateSymbol();
 
   // Create a global (but otherwise uninitialized) context.
   Handle<Context> NewNativeContext();
@@ -214,12 +229,12 @@ class Factory {
                                   Handle<Context> previous,
                                   Handle<ScopeInfo> scope_info);
 
-  // Return the internalized version of the passed in string.
-  Handle<String> InternalizedStringFromString(Handle<String> value);
-
   // Allocate a new struct.  The struct is pretenured (allocated directly in
   // the old generation).
   Handle<Struct> NewStruct(InstanceType type);
+
+  Handle<AliasedArgumentsEntry> NewAliasedArgumentsEntry(
+      int aliased_context_slot);
 
   Handle<DeclaredAccessorDescriptor> NewDeclaredAccessorDescriptor();
 
@@ -246,6 +261,11 @@ class Factory {
       void* external_pointer,
       PretenureFlag pretenure = NOT_TENURED);
 
+  Handle<FixedTypedArrayBase> NewFixedTypedArray(
+      int length,
+      ExternalArrayType array_type,
+      PretenureFlag pretenure = NOT_TENURED);
+
   Handle<Cell> NewCell(Handle<Object> value);
 
   Handle<PropertyCell> NewPropertyCellWithHole();
@@ -268,10 +288,11 @@ class Factory {
   Handle<Map> CopyMap(Handle<Map> map, int extra_inobject_props);
   Handle<Map> CopyMap(Handle<Map> map);
 
-  Handle<Map> GetElementsTransitionMap(Handle<JSObject> object,
-                                       ElementsKind elements_kind);
-
   Handle<FixedArray> CopyFixedArray(Handle<FixedArray> array);
+
+  // This method expects a COW array in new space, and creates a copy
+  // of it in old space.
+  Handle<FixedArray> CopyAndTenureFixedCOWArray(Handle<FixedArray> array);
 
   Handle<FixedArray> CopySizeFixedArray(Handle<FixedArray> array,
                                         int new_length,
@@ -307,15 +328,20 @@ class Factory {
   // runtime.
   Handle<JSObject> NewJSObject(Handle<JSFunction> constructor,
                                PretenureFlag pretenure = NOT_TENURED);
+  // JSObject that should have a memento pointing to the allocation site.
+  Handle<JSObject> NewJSObjectWithMemento(Handle<JSFunction> constructor,
+                                          Handle<AllocationSite> site);
 
   // Global objects are pretenured and initialized based on a constructor.
   Handle<GlobalObject> NewGlobalObject(Handle<JSFunction> constructor);
 
   // JS objects are pretenured when allocated by the bootstrapper and
   // runtime.
-  Handle<JSObject> NewJSObjectFromMap(Handle<Map> map,
-                                      PretenureFlag pretenure = NOT_TENURED,
-                                      bool allocate_properties = true);
+  Handle<JSObject> NewJSObjectFromMap(
+      Handle<Map> map,
+      PretenureFlag pretenure = NOT_TENURED,
+      bool allocate_properties = true,
+      Handle<AllocationSite> allocation_site = Handle<AllocationSite>::null());
 
   Handle<JSObject> NewJSObjectFromMapForDeoptimizer(
       Handle<Map> map, PretenureFlag pretenure = NOT_TENURED);
@@ -326,20 +352,41 @@ class Factory {
 
   // JS arrays are pretenured when allocated by the parser.
   Handle<JSArray> NewJSArray(
+      ElementsKind elements_kind,
+      int length,
+      int capacity,
+      ArrayStorageAllocationMode mode = INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE,
+      PretenureFlag pretenure = NOT_TENURED);
+
+  Handle<JSArray> NewJSArray(
       int capacity,
       ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
+      PretenureFlag pretenure = NOT_TENURED) {
+    return NewJSArray(elements_kind, 0, capacity,
+                      INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE, pretenure);
+  }
+
+  Handle<JSArray> NewJSArrayWithElements(
+      Handle<FixedArrayBase> elements,
+      ElementsKind elements_kind,
+      int length,
       PretenureFlag pretenure = NOT_TENURED);
 
   Handle<JSArray> NewJSArrayWithElements(
       Handle<FixedArrayBase> elements,
       ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
-      PretenureFlag pretenure = NOT_TENURED);
+      PretenureFlag pretenure = NOT_TENURED) {
+    return NewJSArrayWithElements(
+        elements, elements_kind, elements->length(), pretenure);
+  }
 
-  void SetElementsCapacityAndLength(Handle<JSArray> array,
-                                    int capacity,
-                                    int length);
+  void NewJSArrayStorage(
+      Handle<JSArray> array,
+      int length,
+      int capacity,
+      ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS);
 
-  void SetContent(Handle<JSArray> array, Handle<FixedArrayBase> elements);
+  Handle<JSGeneratorObject> NewJSGeneratorObject(Handle<JSFunction> function);
 
   Handle<JSArrayBuffer> NewJSArrayBuffer();
 
@@ -358,7 +405,7 @@ class Factory {
 
   Handle<JSFunction> NewFunctionWithoutPrototype(
       Handle<String> name,
-      LanguageMode language_mode);
+      StrictMode strict_mode);
 
   Handle<JSFunction> NewFunction(Handle<Object> super, bool is_global);
 
@@ -417,6 +464,7 @@ class Factory {
 
   Handle<Object> NewReferenceError(const char* message,
                                    Vector< Handle<Object> > args);
+  Handle<Object> NewReferenceError(const char* message, Handle<JSArray> args);
   Handle<Object> NewReferenceError(Handle<String> message);
 
   Handle<Object> NewEvalError(const char* message,
@@ -507,7 +555,6 @@ class Factory {
       int start_position,
       int end_position,
       Handle<Object> script,
-      Handle<Object> stack_trace,
       Handle<Object> stack_frames);
 
   Handle<SeededNumberDictionary> DictionaryAtNumberPut(
@@ -561,7 +608,7 @@ class Factory {
 
   Handle<JSFunction> NewFunctionWithoutPrototypeHelper(
       Handle<String> name,
-      LanguageMode language_mode);
+      StrictMode strict_mode);
 
   // Create a new map cache.
   Handle<MapCache> NewMapCache(int at_least_space_for);
@@ -582,101 +629,6 @@ Handle<Object> Factory::NewNumberFromSize(size_t value,
     return NewNumber(static_cast<double>(value), pretenure);
   }
 }
-
-
-// Used to "safely" transition from pointer-based runtime code to Handle-based
-// runtime code. When a GC happens during the called Handle-based code, a
-// failure object is returned to the pointer-based code to cause it abort and
-// re-trigger a gc of it's own. Since this double-gc will cause the Handle-based
-// code to be called twice, it must be idempotent.
-class IdempotentPointerToHandleCodeTrampoline {
- public:
-  explicit IdempotentPointerToHandleCodeTrampoline(Isolate* isolate)
-      : isolate_(isolate) {}
-
-  template<typename R>
-  MUST_USE_RESULT MaybeObject* Call(R (*function)()) {
-    int collections = isolate_->heap()->gc_count();
-    (*function)();
-    return (collections == isolate_->heap()->gc_count())
-        ? isolate_->heap()->true_value()
-        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
-  }
-
-  template<typename R>
-  MUST_USE_RESULT MaybeObject* CallWithReturnValue(R (*function)()) {
-    int collections = isolate_->heap()->gc_count();
-    Object* result = (*function)();
-    return (collections == isolate_->heap()->gc_count())
-        ? result
-        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
-  }
-
-  template<typename R, typename P1>
-  MUST_USE_RESULT MaybeObject* Call(R (*function)(P1), P1 p1) {
-    int collections = isolate_->heap()->gc_count();
-    (*function)(p1);
-    return (collections == isolate_->heap()->gc_count())
-        ? isolate_->heap()->true_value()
-        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
-  }
-
-  template<typename R, typename P1>
-  MUST_USE_RESULT MaybeObject* CallWithReturnValue(
-      R (*function)(P1),
-      P1 p1) {
-    int collections = isolate_->heap()->gc_count();
-    Object* result = (*function)(p1);
-    return (collections == isolate_->heap()->gc_count())
-        ? result
-        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
-  }
-
-  template<typename R, typename P1, typename P2>
-  MUST_USE_RESULT MaybeObject* Call(
-      R (*function)(P1, P2),
-      P1 p1,
-      P2 p2) {
-    int collections = isolate_->heap()->gc_count();
-    (*function)(p1, p2);
-    return (collections == isolate_->heap()->gc_count())
-        ? isolate_->heap()->true_value()
-        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
-  }
-
-  template<typename R, typename P1, typename P2>
-  MUST_USE_RESULT MaybeObject* CallWithReturnValue(
-      R (*function)(P1, P2),
-      P1 p1,
-      P2 p2) {
-    int collections = isolate_->heap()->gc_count();
-    Object* result = (*function)(p1, p2);
-    return (collections == isolate_->heap()->gc_count())
-        ? result
-        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
-  }
-
-  template<typename R, typename P1, typename P2, typename P3, typename P4,
-           typename P5, typename P6, typename P7>
-  MUST_USE_RESULT MaybeObject* CallWithReturnValue(
-      R (*function)(P1, P2, P3, P4, P5, P6, P7),
-      P1 p1,
-      P2 p2,
-      P3 p3,
-      P4 p4,
-      P5 p5,
-      P6 p6,
-      P7 p7) {
-    int collections = isolate_->heap()->gc_count();
-    Handle<Object> result = (*function)(p1, p2, p3, p4, p5, p6, p7);
-    return (collections == isolate_->heap()->gc_count())
-        ? *result
-        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
-  }
-
- private:
-  Isolate* isolate_;
-};
 
 
 } }  // namespace v8::internal

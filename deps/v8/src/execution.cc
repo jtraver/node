@@ -77,6 +77,13 @@ static Handle<Object> Invoke(bool is_construct,
 
   // Entering JavaScript.
   VMState<JS> state(isolate);
+  CHECK(AllowJavascriptExecution::IsAllowed(isolate));
+  if (!ThrowOnJavascriptExecution::IsAllowed(isolate)) {
+    isolate->ThrowIllegalOperation();
+    *has_pending_exception = true;
+    isolate->ReportPendingMessages();
+    return Handle<Object>();
+  }
 
   // Placeholder for return value.
   MaybeObject* value = reinterpret_cast<Object*>(kZapValue);
@@ -128,11 +135,6 @@ static Handle<Object> Invoke(bool is_construct,
   ASSERT(*has_pending_exception == isolate->has_pending_exception());
   if (*has_pending_exception) {
     isolate->ReportPendingMessages();
-    if (isolate->pending_exception()->IsOutOfMemory()) {
-      if (!isolate->ignore_out_of_memory()) {
-        V8::FatalProcessOutOfMemory("JS", true);
-      }
-    }
 #ifdef ENABLE_DEBUGGER_SUPPORT
     // Reset stepping state when script exits with uncaught exception.
     if (isolate->debugger()->IsDebuggerActive()) {
@@ -163,9 +165,10 @@ Handle<Object> Execution::Call(Isolate* isolate,
   }
   Handle<JSFunction> func = Handle<JSFunction>::cast(callable);
 
-  // In non-strict mode, convert receiver.
+  // In sloppy mode, convert receiver.
   if (convert_receiver && !receiver->IsJSReceiver() &&
-      !func->shared()->native() && func->shared()->is_classic_mode()) {
+      !func->shared()->native() &&
+      func->shared()->strict_mode() == SLOPPY) {
     if (receiver->IsUndefined() || receiver->IsNull()) {
       Object* global = func->context()->global_object()->global_receiver();
       // Under some circumstances, 'global' can be the JSBuiltinsObject
@@ -217,9 +220,6 @@ Handle<Object> Execution::TryCall(Handle<JSFunction> func,
     ASSERT(catcher.HasCaught());
     ASSERT(isolate->has_pending_exception());
     ASSERT(isolate->external_caught_exception());
-    if (isolate->is_out_of_memory() && !isolate->ignore_out_of_memory()) {
-      V8::FatalProcessOutOfMemory("OOM during Execution::TryCall");
-    }
     if (isolate->pending_exception() ==
         isolate->heap()->termination_exception()) {
       result = isolate->factory()->termination_exception();
@@ -351,6 +351,34 @@ Handle<Object> Execution::TryGetConstructorDelegate(
   *has_pending_exception = true;
 
   return isolate->factory()->undefined_value();
+}
+
+
+void Execution::RunMicrotasks(Isolate* isolate) {
+  ASSERT(isolate->microtask_pending());
+  bool threw = false;
+  Execution::Call(
+      isolate,
+      isolate->run_microtasks(),
+      isolate->factory()->undefined_value(),
+      0,
+      NULL,
+      &threw);
+  ASSERT(!threw);
+}
+
+
+void Execution::EnqueueMicrotask(Isolate* isolate, Handle<Object> microtask) {
+  bool threw = false;
+  Handle<Object> args[] = { microtask };
+  Execution::Call(
+      isolate,
+      isolate->enqueue_external_microtask(),
+      isolate->factory()->undefined_value(),
+      1,
+      args,
+      &threw);
+  ASSERT(!threw);
 }
 
 
@@ -488,6 +516,19 @@ void StackGuard::FullDeopt() {
 }
 
 
+bool StackGuard::IsDeoptMarkedAllocationSites() {
+  ExecutionAccess access(isolate_);
+  return (thread_local_.interrupt_flags_ & DEOPT_MARKED_ALLOCATION_SITES) != 0;
+}
+
+
+void StackGuard::DeoptMarkedAllocationSites() {
+  ExecutionAccess access(isolate_);
+  thread_local_.interrupt_flags_ |= DEOPT_MARKED_ALLOCATION_SITES;
+  set_interrupt_limits(access);
+}
+
+
 #ifdef ENABLE_DEBUGGER_SUPPORT
 bool StackGuard::IsDebugBreak() {
   ExecutionAccess access(isolate_);
@@ -522,6 +563,48 @@ void StackGuard::Continue(InterruptFlag after_what) {
   thread_local_.interrupt_flags_ &= ~static_cast<int>(after_what);
   if (!should_postpone_interrupts(access) && !has_pending_interrupts(access)) {
     reset_limits(access);
+  }
+}
+
+
+void StackGuard::RequestInterrupt(InterruptCallback callback, void* data) {
+  ExecutionAccess access(isolate_);
+  thread_local_.interrupt_flags_ |= API_INTERRUPT;
+  thread_local_.interrupt_callback_ = callback;
+  thread_local_.interrupt_callback_data_ = data;
+  set_interrupt_limits(access);
+}
+
+
+void StackGuard::ClearInterrupt() {
+  thread_local_.interrupt_callback_ = 0;
+  thread_local_.interrupt_callback_data_ = 0;
+  Continue(API_INTERRUPT);
+}
+
+
+bool StackGuard::IsAPIInterrupt() {
+  ExecutionAccess access(isolate_);
+  return thread_local_.interrupt_flags_ & API_INTERRUPT;
+}
+
+
+void StackGuard::InvokeInterruptCallback() {
+  InterruptCallback callback = 0;
+  void* data = 0;
+
+  {
+    ExecutionAccess access(isolate_);
+    callback = thread_local_.interrupt_callback_;
+    data = thread_local_.interrupt_callback_data_;
+    thread_local_.interrupt_callback_ = NULL;
+    thread_local_.interrupt_callback_data_ = NULL;
+  }
+
+  if (callback != NULL) {
+    VMState<EXTERNAL> state(isolate_);
+    HandleScope handle_scope(isolate_);
+    callback(reinterpret_cast<v8::Isolate*>(isolate_), data);
   }
 }
 
@@ -567,6 +650,8 @@ void StackGuard::ThreadLocal::Clear() {
   nesting_ = 0;
   postpone_interrupts_nesting_ = 0;
   interrupt_flags_ = 0;
+  interrupt_callback_ = NULL;
+  interrupt_callback_data_ = NULL;
 }
 
 
@@ -587,6 +672,8 @@ bool StackGuard::ThreadLocal::Initialize(Isolate* isolate) {
   nesting_ = 0;
   postpone_interrupts_nesting_ = 0;
   interrupt_flags_ = 0;
+  interrupt_callback_ = NULL;
+  interrupt_callback_data_ = NULL;
   return should_set_stack_limits;
 }
 
@@ -724,10 +811,10 @@ Handle<JSFunction> Execution::InstantiateFunction(
   if (!data->do_not_cache()) {
     // Fast case: see if the function has already been instantiated
     int serial_number = Smi::cast(data->serial_number())->value();
-    Object* elm =
-        isolate->native_context()->function_cache()->
-            GetElementNoExceptionThrown(isolate, serial_number);
-    if (elm->IsJSFunction()) return Handle<JSFunction>(JSFunction::cast(elm));
+    Handle<JSObject> cache(isolate->native_context()->function_cache());
+    Handle<Object> elm =
+        Object::GetElementNoExceptionThrown(isolate, cache, serial_number);
+    if (elm->IsJSFunction()) return Handle<JSFunction>::cast(elm);
   }
   // The function has not yet been instantiated in this context; do it.
   Handle<Object> args[] = { data };
@@ -813,8 +900,6 @@ Handle<String> Execution::GetStackTraceLine(Handle<Object> recv,
 static Object* RuntimePreempt(Isolate* isolate) {
   // Clear the preempt request flag.
   isolate->stack_guard()->Continue(PREEMPT);
-
-  ContextSwitcher::PreemptionReceived();
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
   if (isolate->debug()->InDebugger()) {
@@ -924,6 +1009,11 @@ MaybeObject* Execution::HandleStackGuardInterrupt(Isolate* isolate) {
     return isolate->heap()->undefined_value();
   }
 
+  if (stack_guard->IsAPIInterrupt()) {
+    stack_guard->InvokeInterruptCallback();
+    stack_guard->Continue(API_INTERRUPT);
+  }
+
   if (stack_guard->IsGCRequest()) {
     isolate->heap()->CollectAllGarbage(Heap::kNoGCFlags,
                                        "StackGuard GC request");
@@ -950,8 +1040,12 @@ MaybeObject* Execution::HandleStackGuardInterrupt(Isolate* isolate) {
     stack_guard->Continue(FULL_DEOPT);
     Deoptimizer::DeoptimizeAll(isolate);
   }
+  if (stack_guard->IsDeoptMarkedAllocationSites()) {
+    stack_guard->Continue(DEOPT_MARKED_ALLOCATION_SITES);
+    isolate->heap()->DeoptMarkedAllocationSites();
+  }
   if (stack_guard->IsInstallCodeRequest()) {
-    ASSERT(FLAG_concurrent_recompilation);
+    ASSERT(isolate->concurrent_recompilation_enabled());
     stack_guard->Continue(INSTALL_CODE);
     isolate->optimizing_compiler_thread()->InstallOptimizedFunctions();
   }

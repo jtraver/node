@@ -312,6 +312,10 @@ void BreakableStatementChecker::VisitThisFunction(ThisFunction* expr) {
 
 bool FullCodeGenerator::MakeCode(CompilationInfo* info) {
   Isolate* isolate = info->isolate();
+
+  Logger::TimerEventScope timer(
+      isolate, Logger::TimerEventScope::v8_compile_full_code);
+
   Handle<Script> script = info->script();
   if (!script->IsUndefined() && !script->source()->IsUndefined()) {
     int len = String::cast(script->source())->length();
@@ -341,7 +345,6 @@ bool FullCodeGenerator::MakeCode(CompilationInfo* info) {
                         info->function()->scope()->AllowsLazyCompilation());
   cgen.PopulateDeoptimizationData(code);
   cgen.PopulateTypeFeedbackInfo(code);
-  cgen.PopulateTypeFeedbackCells(code);
   code->set_has_deoptimization_support(info->HasDeoptimizationSupport());
   code->set_handler_table(*cgen.handler_table());
 #ifdef ENABLE_DEBUGGER_SUPPORT
@@ -383,6 +386,18 @@ unsigned FullCodeGenerator::EmitBackEdgeTable() {
 }
 
 
+void FullCodeGenerator::InitializeFeedbackVector() {
+  int length = info_->function()->slot_count();
+  feedback_vector_ = isolate()->factory()->NewFixedArray(length, TENURED);
+  Handle<Object> sentinel = TypeFeedbackInfo::UninitializedSentinel(isolate());
+  // Ensure that it's safe to set without using a write barrier.
+  ASSERT_EQ(isolate()->heap()->uninitialized_symbol(), *sentinel);
+  for (int i = 0; i < length; i++) {
+    feedback_vector_->set(i, *sentinel, SKIP_WRITE_BARRIER);
+  }
+}
+
+
 void FullCodeGenerator::PopulateDeoptimizationData(Handle<Code> code) {
   // Fill in the deoptimization information.
   ASSERT(info_->HasDeoptimizationSupport() || bailout_entries_.is_empty());
@@ -401,6 +416,7 @@ void FullCodeGenerator::PopulateDeoptimizationData(Handle<Code> code) {
 void FullCodeGenerator::PopulateTypeFeedbackInfo(Handle<Code> code) {
   Handle<TypeFeedbackInfo> info = isolate()->factory()->NewTypeFeedbackInfo();
   info->set_ic_total_count(ic_total_count_);
+  info->set_feedback_vector(*FeedbackVector());
   ASSERT(!isolate()->heap()->InNewSpace(*info));
   code->set_type_feedback_info(*info);
 }
@@ -417,28 +433,26 @@ void FullCodeGenerator::Initialize() {
                          !Snapshot::HaveASnapshotToStartFrom();
   masm_->set_emit_debug_code(generate_debug_code_);
   masm_->set_predictable_code_size(true);
-  InitializeAstVisitor(info_->isolate());
+  InitializeAstVisitor(info_->zone());
 }
-
-
-void FullCodeGenerator::PopulateTypeFeedbackCells(Handle<Code> code) {
-  if (type_feedback_cells_.is_empty()) return;
-  int length = type_feedback_cells_.length();
-  int array_size = TypeFeedbackCells::LengthOfFixedArray(length);
-  Handle<TypeFeedbackCells> cache = Handle<TypeFeedbackCells>::cast(
-      isolate()->factory()->NewFixedArray(array_size, TENURED));
-  for (int i = 0; i < length; i++) {
-    cache->SetAstId(i, type_feedback_cells_[i].ast_id);
-    cache->SetCell(i, *type_feedback_cells_[i].cell);
-  }
-  TypeFeedbackInfo::cast(code->type_feedback_info())->set_type_feedback_cells(
-      *cache);
-}
-
 
 
 void FullCodeGenerator::PrepareForBailout(Expression* node, State state) {
   PrepareForBailoutForId(node->id(), state);
+}
+
+
+void FullCodeGenerator::CallLoadIC(ContextualMode contextual_mode,
+                                   TypeFeedbackId id) {
+  ExtraICState extra_state = LoadIC::ComputeExtraICState(contextual_mode);
+  Handle<Code> ic = LoadIC::initialize_stub(isolate(), extra_state);
+  CallIC(ic, id);
+}
+
+
+void FullCodeGenerator::CallStoreIC(TypeFeedbackId id) {
+  Handle<Code> ic = StoreIC::initialize_stub(isolate(), strict_mode());
+  CallIC(ic, id);
 }
 
 
@@ -470,13 +484,6 @@ void FullCodeGenerator::PrepareForBailoutForId(BailoutId id, State state) {
   ASSERT(!prepared_bailout_ids_.Contains(id.ToInt()));
   prepared_bailout_ids_.Add(id.ToInt(), zone());
   bailout_entries_.Add(entry, zone());
-}
-
-
-void FullCodeGenerator::RecordTypeFeedbackCell(
-    TypeFeedbackId id, Handle<Cell> cell) {
-  TypeFeedbackCellEntry entry = { id, cell };
-  type_feedback_cells_.Add(entry, zone());
 }
 
 
@@ -617,7 +624,7 @@ void FullCodeGenerator::AllocateModules(ZoneList<Declaration*>* declarations) {
         ASSERT(scope->interface()->Index() >= 0);
         __ Push(Smi::FromInt(scope->interface()->Index()));
         __ Push(scope->GetScopeInfo());
-        __ CallRuntime(Runtime::kPushModuleContext, 2);
+        __ CallRuntime(Runtime::kHiddenPushModuleContext, 2);
         StoreToFrameField(StandardFrameConstants::kContextOffset,
                           context_register());
 
@@ -757,7 +764,7 @@ void FullCodeGenerator::VisitModuleLiteral(ModuleLiteral* module) {
   ASSERT(interface->Index() >= 0);
   __ Push(Smi::FromInt(interface->Index()));
   __ Push(Smi::FromInt(0));
-  __ CallRuntime(Runtime::kPushModuleContext, 2);
+  __ CallRuntime(Runtime::kHiddenPushModuleContext, 2);
   StoreToFrameField(StandardFrameConstants::kContextOffset, context_register());
 
   {
@@ -808,10 +815,10 @@ void FullCodeGenerator::VisitModuleUrl(ModuleUrl* module) {
 
 
 int FullCodeGenerator::DeclareGlobalsFlags() {
-  ASSERT(DeclareGlobalsLanguageMode::is_valid(language_mode()));
+  ASSERT(DeclareGlobalsStrictMode::is_valid(strict_mode()));
   return DeclareGlobalsEvalFlag::encode(is_eval()) |
       DeclareGlobalsNativeFlag::encode(is_native()) |
-      DeclareGlobalsLanguageMode::encode(language_mode());
+      DeclareGlobalsStrictMode::encode(strict_mode());
 }
 
 
@@ -832,7 +839,7 @@ void FullCodeGenerator::SetStatementPosition(Statement* stmt) {
   } else {
     // Check if the statement will be breakable without adding a debug break
     // slot.
-    BreakableStatementChecker checker(isolate());
+    BreakableStatementChecker checker(zone());
     checker.Check(stmt);
     // Record the statement position right here if the statement is not
     // breakable. For breakable statements the actual recording of the
@@ -858,7 +865,7 @@ void FullCodeGenerator::SetExpressionPosition(Expression* expr) {
   } else {
     // Check if the expression will be breakable without adding a debug break
     // slot.
-    BreakableStatementChecker checker(isolate());
+    BreakableStatementChecker checker(zone());
     checker.Check(expr);
     // Record a statement position right here if the expression is not
     // breakable. For breakable expressions the actual recording of the
@@ -876,7 +883,7 @@ void FullCodeGenerator::SetExpressionPosition(Expression* expr) {
     }
   }
 #else
-  CodeGenerator::RecordPositions(masm_, pos);
+  CodeGenerator::RecordPositions(masm_, expr->position());
 #endif
 }
 
@@ -901,7 +908,6 @@ void FullCodeGenerator::SetSourcePosition(int pos) {
 const FullCodeGenerator::InlineFunctionGenerator
   FullCodeGenerator::kInlineFunctionGenerators[] = {
     INLINE_FUNCTION_LIST(INLINE_FUNCTION_GENERATOR_ADDRESS)
-    INLINE_RUNTIME_FUNCTION_LIST(INLINE_FUNCTION_GENERATOR_ADDRESS)
   };
 #undef INLINE_FUNCTION_GENERATOR_ADDRESS
 
@@ -1083,16 +1089,9 @@ void FullCodeGenerator::VisitBlock(Block* stmt) {
     scope_ = stmt->scope();
     ASSERT(!scope_->is_module_scope());
     { Comment cmnt(masm_, "[ Extend block context");
-      Handle<ScopeInfo> scope_info = scope_->GetScopeInfo();
-      int heap_slots = scope_info->ContextLength() - Context::MIN_CONTEXT_SLOTS;
-      __ Push(scope_info);
+      __ Push(scope_->GetScopeInfo());
       PushFunctionArgumentForContextAllocation();
-      if (heap_slots <= FastNewBlockContextStub::kMaximumSlots) {
-        FastNewBlockContextStub stub(heap_slots);
-        __ CallStub(&stub);
-      } else {
-        __ CallRuntime(Runtime::kPushBlockContext, 2);
-      }
+      __ CallRuntime(Runtime::kHiddenPushBlockContext, 2);
 
       // Replace the context stored in the frame.
       StoreToFrameField(StandardFrameConstants::kContextOffset,
@@ -1124,7 +1123,7 @@ void FullCodeGenerator::VisitModuleStatement(ModuleStatement* stmt) {
 
   __ Push(Smi::FromInt(stmt->proxy()->interface()->Index()));
   __ Push(Smi::FromInt(0));
-  __ CallRuntime(Runtime::kPushModuleContext, 2);
+  __ CallRuntime(Runtime::kHiddenPushModuleContext, 2);
   StoreToFrameField(
       StandardFrameConstants::kContextOffset, context_register());
 
@@ -1263,7 +1262,7 @@ void FullCodeGenerator::VisitWithStatement(WithStatement* stmt) {
 
   VisitForStackValue(stmt->expression());
   PushFunctionArgumentForContextAllocation();
-  __ CallRuntime(Runtime::kPushWithContext, 2);
+  __ CallRuntime(Runtime::kHiddenPushWithContext, 2);
   StoreToFrameField(StandardFrameConstants::kContextOffset, context_register());
 
   Scope* saved_scope = scope();
@@ -1416,7 +1415,7 @@ void FullCodeGenerator::VisitTryCatchStatement(TryCatchStatement* stmt) {
     __ Push(stmt->variable()->name());
     __ Push(result_register());
     PushFunctionArgumentForContextAllocation();
-    __ CallRuntime(Runtime::kPushCatchContext, 3);
+    __ CallRuntime(Runtime::kHiddenPushCatchContext, 3);
     StoreToFrameField(StandardFrameConstants::kContextOffset,
                       context_register());
   }
@@ -1480,7 +1479,7 @@ void FullCodeGenerator::VisitTryFinallyStatement(TryFinallyStatement* stmt) {
   // rethrow the exception if it returns.
   __ Call(&finally_entry);
   __ Push(result_register());
-  __ CallRuntime(Runtime::kReThrow, 1);
+  __ CallRuntime(Runtime::kHiddenReThrow, 1);
 
   // Finally block implementation.
   __ bind(&finally_entry);
@@ -1579,7 +1578,8 @@ void FullCodeGenerator::VisitNativeFunctionLiteral(
   // Compute the function template for the native function.
   Handle<String> name = expr->name();
   v8::Handle<v8::FunctionTemplate> fun_template =
-      expr->extension()->GetNativeFunction(v8::Utils::ToLocal(name));
+      expr->extension()->GetNativeFunctionTemplate(
+          reinterpret_cast<v8::Isolate*>(isolate()), v8::Utils::ToLocal(name));
   ASSERT(!fun_template.IsEmpty());
 
   // Instantiate the function and create a shared function info from it.
@@ -1605,7 +1605,7 @@ void FullCodeGenerator::VisitNativeFunctionLiteral(
 void FullCodeGenerator::VisitThrow(Throw* expr) {
   Comment cmnt(masm_, "[ Throw");
   VisitForStackValue(expr->exception());
-  __ CallRuntime(Runtime::kThrow, 1);
+  __ CallRuntime(Runtime::kHiddenThrow, 1);
   // Never returns here.
 }
 
@@ -1643,8 +1643,7 @@ bool FullCodeGenerator::TryLiteralCompare(CompareOperation* expr) {
 }
 
 
-void BackEdgeTable::Patch(Isolate* isolate,
-                          Code* unoptimized) {
+void BackEdgeTable::Patch(Isolate* isolate, Code* unoptimized) {
   DisallowHeapAllocation no_gc;
   Code* patch = isolate->builtins()->builtin(Builtins::kOnStackReplacement);
 
@@ -1667,8 +1666,7 @@ void BackEdgeTable::Patch(Isolate* isolate,
 }
 
 
-void BackEdgeTable::Revert(Isolate* isolate,
-                           Code* unoptimized) {
+void BackEdgeTable::Revert(Isolate* isolate, Code* unoptimized) {
   DisallowHeapAllocation no_gc;
   Code* patch = isolate->builtins()->builtin(Builtins::kInterruptCheck);
 
@@ -1693,25 +1691,23 @@ void BackEdgeTable::Revert(Isolate* isolate,
 }
 
 
-void BackEdgeTable::AddStackCheck(CompilationInfo* info) {
+void BackEdgeTable::AddStackCheck(Handle<Code> code, uint32_t pc_offset) {
   DisallowHeapAllocation no_gc;
-  Isolate* isolate = info->isolate();
-  Code* code = info->shared_info()->code();
-  Address pc = code->instruction_start() + info->osr_pc_offset();
-  ASSERT_EQ(ON_STACK_REPLACEMENT, GetBackEdgeState(isolate, code, pc));
+  Isolate* isolate = code->GetIsolate();
+  Address pc = code->instruction_start() + pc_offset;
   Code* patch = isolate->builtins()->builtin(Builtins::kOsrAfterStackCheck);
-  PatchAt(code, pc, OSR_AFTER_STACK_CHECK, patch);
+  PatchAt(*code, pc, OSR_AFTER_STACK_CHECK, patch);
 }
 
 
-void BackEdgeTable::RemoveStackCheck(CompilationInfo* info) {
+void BackEdgeTable::RemoveStackCheck(Handle<Code> code, uint32_t pc_offset) {
   DisallowHeapAllocation no_gc;
-  Isolate* isolate = info->isolate();
-  Code* code = info->shared_info()->code();
-  Address pc = code->instruction_start() + info->osr_pc_offset();
-  if (GetBackEdgeState(isolate, code, pc) == OSR_AFTER_STACK_CHECK) {
+  Isolate* isolate = code->GetIsolate();
+  Address pc = code->instruction_start() + pc_offset;
+
+  if (OSR_AFTER_STACK_CHECK == GetBackEdgeState(isolate, *code, pc)) {
     Code* patch = isolate->builtins()->builtin(Builtins::kOnStackReplacement);
-    PatchAt(code, pc, ON_STACK_REPLACEMENT, patch);
+    PatchAt(*code, pc, ON_STACK_REPLACEMENT, patch);
   }
 }
 

@@ -135,7 +135,6 @@ class GlobalHandles {
   static void Destroy(Object** location);
 
   typedef WeakCallbackData<v8::Value, void>::Callback WeakCallback;
-  typedef WeakReferenceCallbacks<v8::Value, void>::Revivable RevivableCallback;
 
   // Make the global handle weak and set the callback parameter for the
   // handle.  When the garbage collector recognizes that only weak global
@@ -145,14 +144,7 @@ class GlobalHandles {
   // reason is that Smi::FromInt(0) does not change during garage collection.
   static void MakeWeak(Object** location,
                        void* parameter,
-                       WeakCallback weak_callback,
-                       RevivableCallback revivable_callback);
-
-  static inline void MakeWeak(Object** location,
-                              void* parameter,
-                              RevivableCallback revivable_callback) {
-    MakeWeak(location, parameter, NULL, revivable_callback);
-  }
+                       WeakCallback weak_callback);
 
   void RecordStats(HeapStats* stats);
 
@@ -169,7 +161,7 @@ class GlobalHandles {
   }
 
   // Clear the weakness of a global handle.
-  static void ClearWeakness(Object** location);
+  static void* ClearWeakness(Object** location);
 
   // Clear the weakness of a global handle.
   static void MarkIndependent(Object** location);
@@ -348,6 +340,7 @@ class EternalHandles {
   enum SingletonHandle {
     I18N_TEMPLATE_ONE,
     I18N_TEMPLATE_TWO,
+    DATE_CACHE_VERSION,
 
     NUMBER_OF_SINGLETON_HANDLES
   };

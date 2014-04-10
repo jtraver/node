@@ -34,6 +34,7 @@
 #include "disassembler.h"
 #include "macro-assembler.h"
 #include "serialize.h"
+#include "stub-cache.h"
 #include "cctest.h"
 
 using namespace v8::internal;
@@ -48,7 +49,7 @@ static void DummyStaticFunction(Object* result) {
 
 TEST(DisasmIa320) {
   CcTest::InitializeVM();
-  Isolate* isolate = reinterpret_cast<Isolate*>(CcTest::isolate());
+  Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
   v8::internal::byte buffer[2048];
   Assembler assm(isolate, buffer, sizeof buffer);
@@ -73,12 +74,23 @@ TEST(DisasmIa320) {
   __ add(edx, Operand(ebx, 0));
   __ add(edx, Operand(ebx, 16));
   __ add(edx, Operand(ebx, 1999));
+  __ add(edx, Operand(ebx, -4));
+  __ add(edx, Operand(ebx, -1999));
   __ add(edx, Operand(esp, 0));
   __ add(edx, Operand(esp, 16));
   __ add(edx, Operand(esp, 1999));
+  __ add(edx, Operand(esp, -4));
+  __ add(edx, Operand(esp, -1999));
+  __ nop();
+  __ add(esi, Operand(ecx, times_4, 0));
+  __ add(esi, Operand(ecx, times_4, 24));
+  __ add(esi, Operand(ecx, times_4, -4));
+  __ add(esi, Operand(ecx, times_4, -1999));
   __ nop();
   __ add(edi, Operand(ebp, ecx, times_4, 0));
   __ add(edi, Operand(ebp, ecx, times_4, 12));
+  __ add(edi, Operand(ebp, ecx, times_4, -8));
+  __ add(edi, Operand(ebp, ecx, times_4, -3999));
   __ add(Operand(ebp, ecx, times_4, 12), Immediate(12));
 
   __ nop();
@@ -254,7 +266,7 @@ TEST(DisasmIa320) {
   __ bind(&L2);
   __ call(Operand(ebx, ecx, times_4, 10000));
   __ nop();
-  Handle<Code> ic(isolate->builtins()->builtin(Builtins::kLoadIC_Initialize));
+  Handle<Code> ic(LoadIC::initialize_stub(isolate, NOT_CONTEXTUAL));
   __ call(ic, RelocInfo::CODE_TARGET);
   __ nop();
   __ call(FUNCTION_ADDR(DummyStaticFunction), RelocInfo::RUNTIME_ENTRY);
@@ -348,7 +360,37 @@ TEST(DisasmIa320) {
   __ fdivp(3);
   __ fcompp();
   __ fwait();
+  __ frndint();
+  __ fninit();
   __ nop();
+
+  // SSE instruction
+  {
+    if (CpuFeatures::IsSupported(SSE2)) {
+      CpuFeatureScope fscope(&assm, SSE2);
+      // Move operation
+      __ movaps(xmm0, xmm1);
+      __ shufps(xmm0, xmm0, 0x0);
+
+      // logic operation
+      __ andps(xmm0, xmm1);
+      __ andps(xmm0, Operand(ebx, ecx, times_4, 10000));
+      __ orps(xmm0, xmm1);
+      __ orps(xmm0, Operand(ebx, ecx, times_4, 10000));
+      __ xorps(xmm0, xmm1);
+      __ xorps(xmm0, Operand(ebx, ecx, times_4, 10000));
+
+      // Arithmetic operation
+      __ addps(xmm1, xmm0);
+      __ addps(xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ subps(xmm1, xmm0);
+      __ subps(xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ mulps(xmm1, xmm0);
+      __ mulps(xmm1, Operand(ebx, ecx, times_4, 10000));
+      __ divps(xmm1, xmm0);
+      __ divps(xmm1, Operand(ebx, ecx, times_4, 10000));
+    }
+  }
   {
     if (CpuFeatures::IsSupported(SSE2)) {
       CpuFeatureScope fscope(&assm, SSE2);
@@ -356,7 +398,6 @@ TEST(DisasmIa320) {
       __ cvtsi2sd(xmm1, Operand(ebx, ecx, times_4, 10000));
       __ movsd(xmm1, Operand(ebx, ecx, times_4, 10000));
       __ movsd(Operand(ebx, ecx, times_4, 10000), xmm1);
-      __ movaps(xmm0, xmm1);
       // 128 bit move instructions.
       __ movdqa(xmm0, Operand(ebx, ecx, times_4, 10000));
       __ movdqa(Operand(ebx, ecx, times_4, 10000), xmm0);
@@ -370,7 +411,6 @@ TEST(DisasmIa320) {
       __ ucomisd(xmm0, xmm1);
       __ cmpltsd(xmm0, xmm1);
 
-      __ andps(xmm0, xmm1);
       __ andpd(xmm0, xmm1);
       __ psllq(xmm0, 17);
       __ psllq(xmm0, xmm1);

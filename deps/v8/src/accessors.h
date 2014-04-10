@@ -49,7 +49,6 @@ namespace internal {
   V(ScriptId)                       \
   V(ScriptLineOffset)               \
   V(ScriptColumnOffset)             \
-  V(ScriptData)                     \
   V(ScriptType)                     \
   V(ScriptCompilationType)          \
   V(ScriptLineEnds)                 \
@@ -88,9 +87,10 @@ class Accessors : public AllStatic {
 
   // Returns true for properties that are accessors to object fields.
   // If true, *object_offset contains offset of object field.
-  static bool IsJSObjectFieldAccessor(
-      Handle<Map> map, Handle<String> name,
-      int* object_offset);
+  template <class T>
+  static bool IsJSObjectFieldAccessor(typename T::TypeHandle type,
+                                      Handle<String> name,
+                                      int* object_offset);
 
 
  private:
@@ -127,7 +127,6 @@ class Accessors : public AllStatic {
   static MaybeObject* ScriptGetColumnOffset(Isolate* isolate,
                                             Object* object,
                                             void*);
-  static MaybeObject* ScriptGetData(Isolate* isolate, Object* object, void*);
   static MaybeObject* ScriptGetType(Isolate* isolate, Object* object, void*);
   static MaybeObject* ScriptGetCompilationType(Isolate* isolate,
                                                Object* object,
@@ -149,7 +148,7 @@ class Accessors : public AllStatic {
                                                     void*);
 
   // Helper functions.
-  static Object* FlattenNumber(Isolate* isolate, Object* value);
+  static Handle<Object> FlattenNumber(Isolate* isolate, Handle<Object> value);
   static MaybeObject* IllegalSetter(Isolate* isolate,
                                     JSObject*,
                                     Object*,

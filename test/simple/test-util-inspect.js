@@ -34,6 +34,10 @@ Date2.prototype.foo = 'bar';
 var after = util.inspect(d);
 assert.equal(orig, after);
 
+// test positive/negative zero
+assert.equal(util.inspect(0), '0');
+assert.equal(util.inspect(-0), '-0');
+
 // test for sparse array
 var a = ['foo', 'bar', 'baz'];
 assert.equal(util.inspect(a), '[ \'foo\', \'bar\', \'baz\' ]');
@@ -105,6 +109,21 @@ assert.doesNotThrow(function() {
 // GH-2225
 var x = { inspect: util.inspect };
 assert.ok(util.inspect(x).indexOf('inspect') != -1);
+
+// util.inspect should not display the escaped value of a key.
+var w = {
+  '\\': 1,
+  '\\\\': 2,
+  '\\\\\\': 3,
+  '\\\\\\\\': 4,
+}
+
+var y = ['a', 'b', 'c'];
+y['\\\\\\'] = 'd';
+
+assert.ok(util.inspect(w),
+          '{ \'\\\': 1, \'\\\\\': 2, \'\\\\\\\': 3, \'\\\\\\\\\': 4 }');
+assert.ok(util.inspect(y), '[ \'a\', \'b\', \'c\', \'\\\\\\\': \'d\' ]');
 
 // util.inspect.styles and util.inspect.colors
 function test_color_style(style, input, implicit) {
@@ -194,3 +213,25 @@ test_lines({
   very_long_key: 'very_long_value',
   even_longer_key: ['with even longer value in array']
 });
+
+// test boxed primitives output the correct values
+assert.equal(util.inspect(new String('test')), '[String: \'test\']');
+assert.equal(util.inspect(new Boolean(false)), '[Boolean: false]');
+assert.equal(util.inspect(new Boolean(true)), '[Boolean: true]');
+assert.equal(util.inspect(new Number(0)), '[Number: 0]');
+assert.equal(util.inspect(new Number(-0)), '[Number: -0]');
+assert.equal(util.inspect(new Number(-1.1)), '[Number: -1.1]');
+assert.equal(util.inspect(new Number(13.37)), '[Number: 13.37]');
+
+// test boxed primitives with own properties
+var str = new String('baz');
+str.foo = 'bar';
+assert.equal(util.inspect(str), '{ [String: \'baz\'] foo: \'bar\' }');
+
+var bool = new Boolean(true);
+bool.foo = 'bar';
+assert.equal(util.inspect(bool), '{ [Boolean: true] foo: \'bar\' }');
+
+var num = new Number(13.37);
+num.foo = 'bar';
+assert.equal(util.inspect(num), '{ [Number: 13.37] foo: \'bar\' }');

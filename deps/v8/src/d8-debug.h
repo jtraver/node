@@ -31,6 +31,7 @@
 
 #include "d8.h"
 #include "debug.h"
+#include "platform/socket.h"
 
 
 namespace v8 {
@@ -135,7 +136,7 @@ class RemoteDebuggerEvent {
   static const int kDisconnect = 3;
 
   int type() { return type_; }
-  char* data() { return *data_; }
+  char* data() { return data_.get(); }
 
  private:
   void set_next(RemoteDebuggerEvent* event) { next_ = event; }

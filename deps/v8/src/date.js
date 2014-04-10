@@ -46,6 +46,7 @@ var timezone_cache_timezone;
 
 function LocalTimezone(t) {
   if (NUMBER_IS_NAN(t)) return "";
+  CheckDateCacheCurrent();
   if (t == timezone_cache_time) {
     return timezone_cache_timezone;
   }
@@ -132,7 +133,7 @@ function TimeClip(time) {
 // strings over and over again.
 var Date_cache = {
   // Cached time value.
-  time: NAN,
+  time: 0,
   // String input for which the cached time is valid.
   string: null
 };
@@ -156,6 +157,7 @@ function DateConstructor(year, month, date, hours, minutes, seconds, ms) {
     } else if (IS_STRING(year)) {
       // Probe the Date cache. If we already have a time value for the
       // given time, we re-use that instead of parsing the string again.
+      CheckDateCacheCurrent();
       var cache = Date_cache;
       if (cache.string === year) {
         value = cache.time;
@@ -302,8 +304,7 @@ function DateUTC(year, month, date, hours, minutes, seconds, ms) {
 }
 
 
-// Mozilla-specific extension. Returns the number of milliseconds
-// elapsed since 1 January 1970 00:00:00 UTC.
+// ECMA 262 - 15.9.4.4
 function DateNow() {
   return %DateCurrentTime();
 }
@@ -744,15 +745,26 @@ function DateToJSON(key) {
 }
 
 
-function ResetDateCache() {
+var date_cache_version_holder;
+var date_cache_version = NAN;
+
+
+function CheckDateCacheCurrent() {
+  if (!date_cache_version_holder) {
+    date_cache_version_holder = %DateCacheVersion();
+  }
+  if (date_cache_version_holder[0] == date_cache_version) {
+    return;
+  }
+  date_cache_version = date_cache_version_holder[0];
+
   // Reset the timezone cache:
   timezone_cache_time = NAN;
-  timezone_cache_timezone = undefined;
+  timezone_cache_timezone = UNDEFINED;
 
   // Reset the date cache:
-  cache = Date_cache;
-  cache.time = NAN;
-  cache.string = null;
+  Date_cache.time = NAN;
+  Date_cache.string = null;
 }
 
 

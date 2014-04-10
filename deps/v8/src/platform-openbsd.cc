@@ -25,8 +25,8 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Platform specific code for OpenBSD and NetBSD goes here. For the POSIX
-// comaptible parts the implementation is in platform-posix.cc.
+// Platform-specific code for OpenBSD and NetBSD goes here. For the
+// POSIX-compatible parts, the implementation is in platform-posix.cc.
 
 #include <pthread.h>
 #include <semaphore.h>
@@ -59,16 +59,16 @@ namespace v8 {
 namespace internal {
 
 
-const char* OS::LocalTimezone(double time) {
+const char* OS::LocalTimezone(double time, TimezoneCache* cache) {
   if (std::isnan(time)) return "";
-  time_t tv = static_cast<time_t>(floor(time/msPerSecond));
+  time_t tv = static_cast<time_t>(std::floor(time/msPerSecond));
   struct tm* t = localtime(&tv);
   if (NULL == t) return "";
   return t->tm_zone;
 }
 
 
-double OS::LocalTimeOffset() {
+double OS::LocalTimeOffset(TimezoneCache* cache) {
   time_t tv = time(NULL);
   struct tm* t = localtime(&tv);
   // tm_gmtoff includes any daylight savings offset, so subtract it.

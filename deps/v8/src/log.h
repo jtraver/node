@@ -113,16 +113,21 @@ struct TickSample;
   V(BUILTIN_TAG,                    "Builtin")                          \
   V(CALL_DEBUG_BREAK_TAG,           "CallDebugBreak")                   \
   V(CALL_DEBUG_PREPARE_STEP_IN_TAG, "CallDebugPrepareStepIn")           \
-  V(CALL_IC_TAG,                    "CallIC")                           \
   V(CALL_INITIALIZE_TAG,            "CallInitialize")                   \
   V(CALL_MEGAMORPHIC_TAG,           "CallMegamorphic")                  \
   V(CALL_MISS_TAG,                  "CallMiss")                         \
   V(CALL_NORMAL_TAG,                "CallNormal")                       \
   V(CALL_PRE_MONOMORPHIC_TAG,       "CallPreMonomorphic")               \
+  V(LOAD_INITIALIZE_TAG,            "LoadInitialize")                   \
+  V(LOAD_PREMONOMORPHIC_TAG,        "LoadPreMonomorphic")               \
+  V(LOAD_MEGAMORPHIC_TAG,           "LoadMegamorphic")                  \
+  V(STORE_INITIALIZE_TAG,           "StoreInitialize")                  \
+  V(STORE_PREMONOMORPHIC_TAG,       "StorePreMonomorphic")              \
+  V(STORE_GENERIC_TAG,              "StoreGeneric")                     \
+  V(STORE_MEGAMORPHIC_TAG,          "StoreMegamorphic")                 \
   V(KEYED_CALL_DEBUG_BREAK_TAG,     "KeyedCallDebugBreak")              \
   V(KEYED_CALL_DEBUG_PREPARE_STEP_IN_TAG,                               \
     "KeyedCallDebugPrepareStepIn")                                      \
-  V(KEYED_CALL_IC_TAG,              "KeyedCallIC")                      \
   V(KEYED_CALL_INITIALIZE_TAG,      "KeyedCallInitialize")              \
   V(KEYED_CALL_MEGAMORPHIC_TAG,     "KeyedCallMegamorphic")             \
   V(KEYED_CALL_MISS_TAG,            "KeyedCallMiss")                    \
@@ -154,7 +159,9 @@ struct TickSample;
 
 
 class JitLogger;
+class PerfBasicLogger;
 class LowLevelLogger;
+class PerfJitLogger;
 class Sampler;
 
 class Logger {
@@ -309,15 +316,18 @@ class Logger {
   static void EnterExternal(Isolate* isolate);
   static void LeaveExternal(Isolate* isolate);
 
+  static void EmptyLogInternalEvents(const char* name, int se) { }
+  static void LogInternalEvents(const char* name, int se);
+
   class TimerEventScope {
    public:
     TimerEventScope(Isolate* isolate, const char* name)
         : isolate_(isolate), name_(name) {
-      if (FLAG_log_internal_timer_events) LogTimerEvent(START);
+      LogTimerEvent(START);
     }
 
     ~TimerEventScope() {
-      if (FLAG_log_internal_timer_events) LogTimerEvent(END);
+      LogTimerEvent(END);
     }
 
     void LogTimerEvent(StartEnd se);
@@ -339,7 +349,7 @@ class Logger {
   void RegExpCompileEvent(Handle<JSRegExp> regexp, bool in_cache);
 
   // Log an event reported from generated code
-  void LogRuntime(Vector<const char> format, JSArray* args);
+  void LogRuntime(Vector<const char> format, Handle<JSArray> args);
 
   bool is_logging() {
     return is_logging_;
@@ -437,6 +447,8 @@ class Logger {
 
   bool is_logging_;
   Log* log_;
+  PerfBasicLogger* perf_basic_logger_;
+  PerfJitLogger* perf_jit_logger_;
   LowLevelLogger* ll_logger_;
   JitLogger* jit_logger_;
   List<CodeEventListener*> listeners_;

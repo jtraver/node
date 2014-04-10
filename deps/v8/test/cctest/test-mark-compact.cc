@@ -35,6 +35,7 @@
 #include <errno.h>
 #endif
 
+#include <utility>
 
 #include "v8.h"
 
@@ -81,7 +82,7 @@ TEST(Promotion) {
 
   // Allocate a fixed array in the new space.
   int array_length =
-      (Page::kMaxNonCodeHeapObjectSize - FixedArray::kHeaderSize) /
+      (Page::kMaxRegularHeapObjectSize - FixedArray::kHeaderSize) /
       (4 * kPointerSize);
   Object* obj = heap->AllocateFixedArray(array_length)->ToObjectChecked();
   Handle<FixedArray> array(FixedArray::cast(obj));
@@ -106,7 +107,7 @@ TEST(NoPromotion) {
 
   // Allocate a big fixed array in the new space.
   int array_length =
-      (Page::kMaxNonCodeHeapObjectSize - FixedArray::kHeaderSize) /
+      (Page::kMaxRegularHeapObjectSize - FixedArray::kHeaderSize) /
       (2 * kPointerSize);
   Object* obj = heap->AllocateFixedArray(array_length)->ToObjectChecked();
   Handle<FixedArray> array(FixedArray::cast(obj));
@@ -161,7 +162,7 @@ TEST(MarkCompactCollector) {
   SharedFunctionInfo* function_share = SharedFunctionInfo::cast(
       heap->AllocateSharedFunctionInfo(func_name)->ToObjectChecked());
   JSFunction* function = JSFunction::cast(
-      heap->AllocateFunction(*isolate->function_map(),
+      heap->AllocateFunction(*isolate->sloppy_function_map(),
                              function_share,
                              heap->undefined_value())->ToObjectChecked());
   Map* initial_map =
@@ -169,7 +170,7 @@ TEST(MarkCompactCollector) {
                                   JSObject::kHeaderSize)->ToObjectChecked());
   function->set_initial_map(initial_map);
   JSReceiver::SetProperty(
-      global, handle(func_name), handle(function), NONE, kNonStrictMode);
+      global, handle(func_name), handle(function), NONE, SLOPPY);
 
   JSObject* obj = JSObject::cast(
       heap->AllocateJSObject(function)->ToObjectChecked());
@@ -186,13 +187,12 @@ TEST(MarkCompactCollector) {
   obj = JSObject::cast(heap->AllocateJSObject(function)->ToObjectChecked());
   String* obj_name =
       String::cast(heap->InternalizeUtf8String("theObject")->ToObjectChecked());
-  JSReceiver::SetProperty(
-      global, handle(obj_name), handle(obj), NONE, kNonStrictMode);
+  JSReceiver::SetProperty(global, handle(obj_name), handle(obj), NONE, SLOPPY);
   String* prop_name =
       String::cast(heap->InternalizeUtf8String("theSlot")->ToObjectChecked());
   Handle<Smi> twenty_three(Smi::FromInt(23), isolate);
   JSReceiver::SetProperty(
-      handle(obj), handle(prop_name), twenty_three, NONE, kNonStrictMode);
+      handle(obj), handle(prop_name), twenty_three, NONE, SLOPPY);
 
   heap->CollectGarbage(OLD_POINTER_SPACE, "trigger 5");
 
@@ -245,12 +245,14 @@ TEST(MapCompact) {
 
 
 static int NumberOfWeakCalls = 0;
-static void WeakPointerCallback(v8::Isolate* isolate,
-                                v8::Persistent<v8::Value>* handle,
-                                void* id) {
-  ASSERT(id == reinterpret_cast<void*>(1234));
+static void WeakPointerCallback(
+    const v8::WeakCallbackData<v8::Value, void>& data) {
+  std::pair<v8::Persistent<v8::Value>*, int>* p =
+      reinterpret_cast<std::pair<v8::Persistent<v8::Value>*, int>*>(
+          data.GetParameter());
+  ASSERT_EQ(1234, p->second);
   NumberOfWeakCalls++;
-  handle->Dispose();
+  p->first->Reset();
 }
 
 
@@ -268,15 +270,18 @@ TEST(ObjectGroups) {
       global_handles->Create(heap->AllocateFixedArray(1)->ToObjectChecked());
   Handle<Object> g1c1 =
       global_handles->Create(heap->AllocateFixedArray(1)->ToObjectChecked());
-  global_handles->MakeWeak(g1s1.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
-  global_handles->MakeWeak(g1s2.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
-  global_handles->MakeWeak(g1c1.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
+  std::pair<Handle<Object>*, int> g1s1_and_id(&g1s1, 1234);
+  GlobalHandles::MakeWeak(g1s1.location(),
+                          reinterpret_cast<void*>(&g1s1_and_id),
+                          &WeakPointerCallback);
+  std::pair<Handle<Object>*, int> g1s2_and_id(&g1s2, 1234);
+  GlobalHandles::MakeWeak(g1s2.location(),
+                          reinterpret_cast<void*>(&g1s2_and_id),
+                          &WeakPointerCallback);
+  std::pair<Handle<Object>*, int> g1c1_and_id(&g1c1, 1234);
+  GlobalHandles::MakeWeak(g1c1.location(),
+                          reinterpret_cast<void*>(&g1c1_and_id),
+                          &WeakPointerCallback);
 
   Handle<Object> g2s1 =
       global_handles->Create(heap->AllocateFixedArray(1)->ToObjectChecked());
@@ -284,15 +289,18 @@ TEST(ObjectGroups) {
     global_handles->Create(heap->AllocateFixedArray(1)->ToObjectChecked());
   Handle<Object> g2c1 =
     global_handles->Create(heap->AllocateFixedArray(1)->ToObjectChecked());
-  global_handles->MakeWeak(g2s1.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
-  global_handles->MakeWeak(g2s2.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
-  global_handles->MakeWeak(g2c1.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
+  std::pair<Handle<Object>*, int> g2s1_and_id(&g2s1, 1234);
+  GlobalHandles::MakeWeak(g2s1.location(),
+                          reinterpret_cast<void*>(&g2s1_and_id),
+                          &WeakPointerCallback);
+  std::pair<Handle<Object>*, int> g2s2_and_id(&g2s2, 1234);
+  GlobalHandles::MakeWeak(g2s2.location(),
+                          reinterpret_cast<void*>(&g2s2_and_id),
+                          &WeakPointerCallback);
+  std::pair<Handle<Object>*, int> g2c1_and_id(&g2c1, 1234);
+  GlobalHandles::MakeWeak(g2c1.location(),
+                          reinterpret_cast<void*>(&g2c1_and_id),
+                          &WeakPointerCallback);
 
   Handle<Object> root = global_handles->Create(*g1s1);  // make a root.
 
@@ -319,9 +327,10 @@ TEST(ObjectGroups) {
   CHECK_EQ(0, NumberOfWeakCalls);
 
   // Weaken the root.
-  global_handles->MakeWeak(root.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
+  std::pair<Handle<Object>*, int> root_and_id(&root, 1234);
+  GlobalHandles::MakeWeak(root.location(),
+                          reinterpret_cast<void*>(&root_and_id),
+                          &WeakPointerCallback);
   // But make children strong roots---all the objects (except for children)
   // should be collectable now.
   global_handles->ClearWeakness(g1c1.location());
@@ -347,12 +356,12 @@ TEST(ObjectGroups) {
   CHECK_EQ(5, NumberOfWeakCalls);
 
   // And now make children weak again and collect them.
-  global_handles->MakeWeak(g1c1.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
-  global_handles->MakeWeak(g2c1.location(),
-                           reinterpret_cast<void*>(1234),
-                           &WeakPointerCallback);
+  GlobalHandles::MakeWeak(g1c1.location(),
+                          reinterpret_cast<void*>(&g1c1_and_id),
+                          &WeakPointerCallback);
+  GlobalHandles::MakeWeak(g2c1.location(),
+                          reinterpret_cast<void*>(&g2c1_and_id),
+                          &WeakPointerCallback);
 
   heap->CollectGarbage(OLD_POINTER_SPACE);
   CHECK_EQ(7, NumberOfWeakCalls);
@@ -486,6 +495,7 @@ TEST(BootUpMemoryUse) {
   intptr_t initial_memory = MemoryInUse();
   // Avoid flakiness.
   FLAG_crankshaft = false;
+  FLAG_concurrent_osr = false;
   FLAG_concurrent_recompilation = false;
 
   // Only Linux has the proc filesystem and only if it is mapped.  If it's not

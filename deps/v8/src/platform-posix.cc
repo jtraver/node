@@ -25,9 +25,9 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Platform specific code for POSIX goes here. This is not a platform on its
-// own but contains the parts which are the same across POSIX platforms Linux,
-// Mac OS, FreeBSD and OpenBSD.
+// Platform-specific code for POSIX goes here. This is not a platform on its
+// own, but contains the parts which are the same across the POSIX platforms
+// Linux, MacOS, FreeBSD, OpenBSD, NetBSD and QNX.
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -130,6 +130,13 @@ uint64_t OS::TotalPhysicalMemory() {
     return 0;
   }
   return static_cast<uint64_t>(memory_info.dwTotalPhys);
+#elif V8_OS_QNX
+  struct stat stat_buf;
+  if (stat("/proc", &stat_buf) != 0) {
+    UNREACHABLE();
+    return 0;
+  }
+  return static_cast<uint64_t>(stat_buf.st_size);
 #else
   intptr_t pages = sysconf(_SC_PHYS_PAGES);
   intptr_t page_size = sysconf(_SC_PAGESIZE);
@@ -176,10 +183,10 @@ void OS::Free(void* address, const size_t size) {
 
 // Get rid of writable permission on code allocations.
 void OS::ProtectCode(void* address, const size_t size) {
-#if defined(__CYGWIN__)
+#if V8_OS_CYGWIN
   DWORD old_protect;
   VirtualProtect(address, size, PAGE_EXECUTE_READ, &old_protect);
-#elif defined(__native_client__)
+#elif V8_OS_NACL
   // The Native Client port of V8 uses an interpreter, so
   // code pages don't need PROT_EXEC.
   mprotect(address, size, PROT_READ);
@@ -191,7 +198,7 @@ void OS::ProtectCode(void* address, const size_t size) {
 
 // Create guard pages.
 void OS::Guard(void* address, const size_t size) {
-#if defined(__CYGWIN__)
+#if V8_OS_CYGWIN
   DWORD oldprotect;
   VirtualProtect(address, size, PAGE_NOACCESS, &oldprotect);
 #else
@@ -201,7 +208,7 @@ void OS::Guard(void* address, const size_t size) {
 
 
 void* OS::GetRandomMmapAddr() {
-#if defined(__native_client__)
+#if V8_OS_NACL
   // TODO(bradchen): restore randomization once Native Client gets
   // smarter about using mmap address hints.
   // See http://code.google.com/p/nativeclient/issues/3341
@@ -247,7 +254,7 @@ void* OS::GetRandomMmapAddr() {
 
 
 size_t OS::AllocateAlignment() {
-  return getpagesize();
+  return static_cast<size_t>(sysconf(_SC_PAGESIZE));
 }
 
 
@@ -258,10 +265,10 @@ void OS::Sleep(int milliseconds) {
 
 
 void OS::Abort() {
-  // Redirect to std abort to signal abnormal program termination.
-  if (FLAG_break_on_abort) {
-    DebugBreak();
+  if (FLAG_hard_abort) {
+    V8_IMMEDIATE_CRASH();
   }
+  // Redirect to std abort to signal abnormal program termination.
   abort();
 }
 
@@ -269,6 +276,8 @@ void OS::Abort() {
 void OS::DebugBreak() {
 #if V8_HOST_ARCH_ARM
   asm("bkpt 0");
+#elif V8_HOST_ARCH_ARM64
+  asm("brk 0");
 #elif V8_HOST_ARCH_MIPS
   asm("break");
 #elif V8_HOST_ARCH_IA32
@@ -288,14 +297,8 @@ void OS::DebugBreak() {
 // ----------------------------------------------------------------------------
 // Math functions
 
-double ceiling(double x) {
-  // Correct buggy 'ceil' on some systems (i.e. FreeBSD, OS X 10.5)
-  return (-1.0 < x && x < 0.0) ? -0.0 : ceil(x);
-}
-
-
 double modulo(double x, double y) {
-  return fmod(x, y);
+  return std::fmod(x, y);
 }
 
 
@@ -308,10 +311,6 @@ double fast_##name(double x) {                           \
   return (*fast_##name##_function)(x);                   \
 }
 
-UNARY_MATH_FUNCTION(sin, CreateTranscendentalFunction(TranscendentalCache::SIN))
-UNARY_MATH_FUNCTION(cos, CreateTranscendentalFunction(TranscendentalCache::COS))
-UNARY_MATH_FUNCTION(tan, CreateTranscendentalFunction(TranscendentalCache::TAN))
-UNARY_MATH_FUNCTION(log, CreateTranscendentalFunction(TranscendentalCache::LOG))
 UNARY_MATH_FUNCTION(exp, CreateExpFunction())
 UNARY_MATH_FUNCTION(sqrt, CreateSqrtFunction())
 
@@ -355,9 +354,27 @@ double OS::TimeCurrentMillis() {
 }
 
 
-double OS::DaylightSavingsOffset(double time) {
+class TimezoneCache {};
+
+
+TimezoneCache* OS::CreateTimezoneCache() {
+  return NULL;
+}
+
+
+void OS::DisposeTimezoneCache(TimezoneCache* cache) {
+  ASSERT(cache == NULL);
+}
+
+
+void OS::ClearTimezoneCache(TimezoneCache* cache) {
+  ASSERT(cache == NULL);
+}
+
+
+double OS::DaylightSavingsOffset(double time, TimezoneCache*) {
   if (std::isnan(time)) return nan_value();
-  time_t tv = static_cast<time_t>(floor(time/msPerSecond));
+  time_t tv = static_cast<time_t>(std::floor(time/msPerSecond));
   struct tm* t = localtime(&tv);
   if (NULL == t) return nan_value();
   return t->tm_isdst > 0 ? 3600 * msPerSecond : 0;
@@ -495,8 +512,8 @@ void OS::MemMove(void* dest, const void* src, size_t size) {
 
 #elif defined(V8_HOST_ARCH_ARM)
 void OS::MemCopyUint16Uint8Wrapper(uint16_t* dest,
-                               const uint8_t* src,
-                               size_t chars) {
+                                   const uint8_t* src,
+                                   size_t chars) {
   uint16_t *limit = dest + chars;
   while (dest < limit) {
     *dest++ = static_cast<uint16_t>(*src++);
@@ -512,6 +529,12 @@ OS::MemCopyUint8Function CreateMemCopyUint8Function(
     OS::MemCopyUint8Function stub);
 OS::MemCopyUint16Uint8Function CreateMemCopyUint16Uint8Function(
     OS::MemCopyUint16Uint8Function stub);
+
+#elif defined(V8_HOST_ARCH_MIPS)
+OS::MemCopyUint8Function OS::memcopy_uint8_function = &OS::MemCopyUint8Wrapper;
+// Defined in codegen-mips.cc.
+OS::MemCopyUint8Function CreateMemCopyUint8Function(
+    OS::MemCopyUint8Function stub);
 #endif
 
 
@@ -526,11 +549,10 @@ void OS::PostSetUp() {
       CreateMemCopyUint8Function(&OS::MemCopyUint8Wrapper);
   OS::memcopy_uint16_uint8_function =
       CreateMemCopyUint16Uint8Function(&OS::MemCopyUint16Uint8Wrapper);
+#elif defined(V8_HOST_ARCH_MIPS)
+  OS::memcopy_uint8_function =
+      CreateMemCopyUint8Function(&OS::MemCopyUint8Wrapper);
 #endif
-  init_fast_sin_function();
-  init_fast_cos_function();
-  init_fast_tan_function();
-  init_fast_log_function();
   // fast_exp is initialized lazily.
   init_fast_sqrt_function();
 }
@@ -558,12 +580,17 @@ class Thread::PlatformData : public Malloced {
  public:
   PlatformData() : thread_(kNoThread) {}
   pthread_t thread_;  // Thread handle for pthread.
+  // Synchronizes thread creation
+  Mutex thread_creation_mutex_;
 };
 
 Thread::Thread(const Options& options)
     : data_(new PlatformData),
       stack_size_(options.stack_size()),
       start_semaphore_(NULL) {
+  if (stack_size_ > 0 && stack_size_ < PTHREAD_STACK_MIN) {
+    stack_size_ = PTHREAD_STACK_MIN;
+  }
   set_name(options.name());
 }
 
@@ -574,12 +601,12 @@ Thread::~Thread() {
 
 
 static void SetThreadName(const char* name) {
-#if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#if V8_OS_DRAGONFLYBSD || V8_OS_FREEBSD || V8_OS_OPENBSD
   pthread_set_name_np(pthread_self(), name);
-#elif defined(__NetBSD__)
+#elif V8_OS_NETBSD
   STATIC_ASSERT(Thread::kMaxThreadNameLength <= PTHREAD_MAX_NAMELEN_NP);
   pthread_setname_np(pthread_self(), "%s", name);
-#elif defined(__APPLE__)
+#elif V8_OS_MACOSX
   // pthread_setname_np is only available in 10.6 or later, so test
   // for it at runtime.
   int (*dynamic_pthread_setname_np)(const char*);
@@ -602,10 +629,10 @@ static void SetThreadName(const char* name) {
 
 static void* ThreadEntry(void* arg) {
   Thread* thread = reinterpret_cast<Thread*>(arg);
-  // This is also initialized by the first argument to pthread_create() but we
-  // don't know which thread will run first (the original thread or the new
-  // one) so we initialize it here too.
-  thread->data()->thread_ = pthread_self();
+  // We take the lock here to make sure that pthread_create finished first since
+  // we don't know which thread will run first (the original thread or the new
+  // one).
+  { LockGuard<Mutex> lock_guard(&thread->data()->thread_creation_mutex_); }
   SetThreadName(thread->name());
   ASSERT(thread->data()->thread_ != kNoThread);
   thread->NotifyStartedAndRun();
@@ -626,13 +653,16 @@ void Thread::Start() {
   result = pthread_attr_init(&attr);
   ASSERT_EQ(0, result);
   // Native client uses default stack size.
-#if !defined(__native_client__)
+#if !V8_OS_NACL
   if (stack_size_ > 0) {
     result = pthread_attr_setstacksize(&attr, static_cast<size_t>(stack_size_));
     ASSERT_EQ(0, result);
   }
 #endif
-  result = pthread_create(&data_->thread_, &attr, ThreadEntry, this);
+  {
+    LockGuard<Mutex> lock_guard(&data_->thread_creation_mutex_);
+    result = pthread_create(&data_->thread_, &attr, ThreadEntry, this);
+  }
   ASSERT_EQ(0, result);
   result = pthread_attr_destroy(&attr);
   ASSERT_EQ(0, result);
@@ -654,7 +684,7 @@ void Thread::YieldCPU() {
 
 
 static Thread::LocalStorageKey PthreadKeyToLocalKey(pthread_key_t pthread_key) {
-#if defined(__CYGWIN__)
+#if V8_OS_CYGWIN
   // We need to cast pthread_key_t to Thread::LocalStorageKey in two steps
   // because pthread_key_t is a pointer type on Cygwin. This will probably not
   // work on 64-bit platforms, but Cygwin doesn't support 64-bit anyway.
@@ -668,7 +698,7 @@ static Thread::LocalStorageKey PthreadKeyToLocalKey(pthread_key_t pthread_key) {
 
 
 static pthread_key_t LocalKeyToPthreadKey(Thread::LocalStorageKey local_key) {
-#if defined(__CYGWIN__)
+#if V8_OS_CYGWIN
   STATIC_ASSERT(sizeof(Thread::LocalStorageKey) == sizeof(pthread_key_t));
   intptr_t ptr_key = static_cast<intptr_t>(local_key);
   return reinterpret_cast<pthread_key_t>(ptr_key);

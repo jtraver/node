@@ -1266,6 +1266,10 @@ TEST(15) {
     uint32_t dstA1;
     uint32_t dstA2;
     uint32_t dstA3;
+    uint32_t dstA4;
+    uint32_t dstA5;
+    uint32_t dstA6;
+    uint32_t dstA7;
   } T;
   T t;
 
@@ -1291,7 +1295,14 @@ TEST(15) {
     __ add(r4, r0, Operand(OFFSET_OF(T, dstA0)));
     __ vst1(Neon8, NeonListOperand(d0, 2), NeonMemOperand(r4));
 
-  __ ldm(ia_w, sp, r4.bit() | pc.bit());
+    // The same expansion, but with different source and destination registers.
+    __ add(r4, r0, Operand(OFFSET_OF(T, srcA0)));
+    __ vld1(Neon8, NeonListOperand(d1), NeonMemOperand(r4));
+    __ vmovl(NeonU8, q1, d1);
+    __ add(r4, r0, Operand(OFFSET_OF(T, dstA4)));
+    __ vst1(Neon8, NeonListOperand(d2, 2), NeonMemOperand(r4));
+
+    __ ldm(ia_w, sp, r4.bit() | pc.bit());
 
     CodeDesc desc;
     assm.GetCode(&desc);
@@ -1326,6 +1337,10 @@ TEST(15) {
     t.dstA1 = 0;
     t.dstA2 = 0;
     t.dstA3 = 0;
+    t.dstA4 = 0;
+    t.dstA5 = 0;
+    t.dstA6 = 0;
+    t.dstA7 = 0;
     Object* dummy = CALL_GENERATED_CODE(f, &t, 0, 0, 0, 0);
     USE(dummy);
     CHECK_EQ(0x01020304, t.dst0);
@@ -1340,6 +1355,10 @@ TEST(15) {
     CHECK_EQ(0x00410042, t.dstA1);
     CHECK_EQ(0x00830084, t.dstA2);
     CHECK_EQ(0x00810082, t.dstA3);
+    CHECK_EQ(0x00430044, t.dstA4);
+    CHECK_EQ(0x00410042, t.dstA5);
+    CHECK_EQ(0x00830084, t.dstA6);
+    CHECK_EQ(0x00810082, t.dstA7);
   }
 }
 
@@ -1437,6 +1456,72 @@ TEST(17) {
   __ bind(&target);
   __ nop();
 }
+
+
+#define TEST_SDIV(expected_, dividend_, divisor_) \
+    t.dividend = dividend_; \
+    t.divisor = divisor_; \
+    t.result = 0; \
+    dummy = CALL_GENERATED_CODE(f, &t, 0, 0, 0, 0); \
+    CHECK_EQ(expected_, t.result);
+
+
+TEST(18) {
+  // Test the sdiv.
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+  HandleScope scope(isolate);
+
+  typedef struct {
+    uint32_t dividend;
+    uint32_t divisor;
+    uint32_t result;
+  } T;
+  T t;
+
+  Assembler assm(isolate, NULL, 0);
+
+  if (CpuFeatures::IsSupported(SUDIV)) {
+    CpuFeatureScope scope(&assm, SUDIV);
+
+    __ mov(r3, Operand(r0));
+
+    __ ldr(r0, MemOperand(r3, OFFSET_OF(T, dividend)));
+    __ ldr(r1, MemOperand(r3, OFFSET_OF(T, divisor)));
+
+    __ sdiv(r2, r0, r1);
+    __ str(r2, MemOperand(r3, OFFSET_OF(T, result)));
+
+  __ bx(lr);
+
+    CodeDesc desc;
+    assm.GetCode(&desc);
+    Object* code = isolate->heap()->CreateCode(
+        desc,
+        Code::ComputeFlags(Code::STUB),
+        Handle<Code>())->ToObjectChecked();
+    CHECK(code->IsCode());
+#ifdef DEBUG
+    Code::cast(code)->Print();
+#endif
+    F3 f = FUNCTION_CAST<F3>(Code::cast(code)->entry());
+    Object* dummy;
+    TEST_SDIV(1073741824, kMinInt, -2);
+    TEST_SDIV(kMinInt, kMinInt, -1);
+    TEST_SDIV(5, 10, 2);
+    TEST_SDIV(3, 10, 3);
+    TEST_SDIV(-5, 10, -2);
+    TEST_SDIV(-3, 10, -3);
+    TEST_SDIV(-5, -10, 2);
+    TEST_SDIV(-3, -10, 3);
+    TEST_SDIV(5, -10, -2);
+    TEST_SDIV(3, -10, -3);
+    USE(dummy);
+  }
+}
+
+
+#undef TEST_SDIV
 
 
 TEST(code_relative_offset) {

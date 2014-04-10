@@ -40,6 +40,8 @@
 #define UV__EAI_SERVICE     (-3010)
 #define UV__EAI_SOCKTYPE    (-3011)
 #define UV__EAI_SYSTEM      (-3012) /* TODO(bnoordhuis) Return system error. */
+#define UV__EAI_BADHINTS    (-3013)
+#define UV__EAI_PROTOCOL    (-3014)
 
 /* Only map to the system errno on non-Windows platforms. It's apparently
  * a fairly common practice for Windows programmers to redefine errno codes.
@@ -362,10 +364,46 @@
 # define UV__ETIMEDOUT (-4039)
 #endif
 
+#if defined(ETXTBSY) && !defined(_WIN32)
+# define UV__ETXTBSY (-ETXTBSY)
+#else
+# define UV__ETXTBSY (-4038)
+#endif
+
 #if defined(EXDEV) && !defined(_WIN32)
 # define UV__EXDEV (-EXDEV)
 #else
 # define UV__EXDEV (-4037)
+#endif
+
+#if defined(EFBIG) && !defined(_WIN32)
+# define UV__EFBIG (-EFBIG)
+#else
+# define UV__EFBIG (-4036)
+#endif
+
+#if defined(ENOPROTOOPT) && !defined(_WIN32)
+# define UV__ENOPROTOOPT (-ENOPROTOOPT)
+#else
+# define UV__ENOPROTOOPT (-4035)
+#endif
+
+#if defined(ERANGE) && !defined(_WIN32)
+# define UV__ERANGE (-ERANGE)
+#else
+# define UV__ERANGE (-4034)
+#endif
+
+#if defined(ENXIO) && !defined(_WIN32)
+# define UV__ENXIO (-ENXIO)
+#else
+# define UV__ENXIO (-4033)
+#endif
+
+#if defined(EMLINK) && !defined(_WIN32)
+# define UV__EMLINK (-EMLINK)
+#else
+# define UV__EMLINK (-4032)
 #endif
 
 #endif /* UV_ERRNO_H_ */

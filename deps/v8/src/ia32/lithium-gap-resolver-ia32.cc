@@ -309,7 +309,7 @@ void LGapResolver::EmitMove(int index) {
       Representation r = cgen_->IsSmi(constant_source)
           ? Representation::Smi() : Representation::Integer32();
       if (cgen_->IsInteger32(constant_source)) {
-        __ Set(dst, cgen_->ToImmediate(constant_source, r));
+        __ Move(dst, cgen_->ToImmediate(constant_source, r));
       } else {
         __ LoadObject(dst, cgen_->ToHandle(constant_source));
       }
@@ -342,7 +342,7 @@ void LGapResolver::EmitMove(int index) {
       Representation r = cgen_->IsSmi(constant_source)
           ? Representation::Smi() : Representation::Integer32();
       if (cgen_->IsInteger32(constant_source)) {
-        __ Set(dst, cgen_->ToImmediate(constant_source, r));
+        __ Move(dst, cgen_->ToImmediate(constant_source, r));
       } else {
         Register tmp = EnsureTempRegister();
         __ LoadObject(tmp, cgen_->ToHandle(constant_source));
@@ -488,7 +488,7 @@ void LGapResolver::EmitSwap(int index) {
         cgen_->ToOperand(source->IsDoubleRegister() ? destination : source);
     __ movsd(xmm0, other);
     __ movsd(other, reg);
-    __ movsd(reg, Operand(xmm0));
+    __ movaps(reg, xmm0);
   } else if (source->IsDoubleStackSlot() && destination->IsDoubleStackSlot()) {
     CpuFeatureScope scope(cgen_->masm(), SSE2);
     // Double-width memory-to-memory.  Spill on demand to use a general

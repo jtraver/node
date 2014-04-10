@@ -40,9 +40,12 @@
 #include "objects-visiting.h"
 #include "platform.h"
 #include "snapshot.h"
+#include "trig-table.h"
 #include "extensions/externalize-string-extension.h"
+#include "extensions/free-buffer-extension.h"
 #include "extensions/gc-extension.h"
 #include "extensions/statistics-extension.h"
+#include "extensions/trigger-failure-extension.h"
 #include "code-stubs.h"
 
 namespace v8 {
@@ -85,6 +88,8 @@ Handle<String> Bootstrapper::NativesSourceLookup(int index) {
                                           source.length());
     Handle<String> source_code =
         isolate_->factory()->NewExternalStringFromAscii(resource);
+    // We do not expect this to throw an exception. Change this if it does.
+    CHECK_NOT_EMPTY_HANDLE(isolate_, source_code);
     heap->natives_source_cache()->set(index, *source_code);
   }
   Handle<Object> cached_source(heap->natives_source_cache()->get(index),
@@ -98,10 +103,39 @@ void Bootstrapper::Initialize(bool create_heap_objects) {
 }
 
 
+static const char* GCFunctionName() {
+  bool flag_given = FLAG_expose_gc_as != NULL && strlen(FLAG_expose_gc_as) != 0;
+  return flag_given ? FLAG_expose_gc_as : "gc";
+}
+
+
+v8::Extension* Bootstrapper::free_buffer_extension_ = NULL;
+v8::Extension* Bootstrapper::gc_extension_ = NULL;
+v8::Extension* Bootstrapper::externalize_string_extension_ = NULL;
+v8::Extension* Bootstrapper::statistics_extension_ = NULL;
+v8::Extension* Bootstrapper::trigger_failure_extension_ = NULL;
+
+
 void Bootstrapper::InitializeOncePerProcess() {
-  GCExtension::Register();
-  ExternalizeStringExtension::Register();
-  StatisticsExtension::Register();
+  free_buffer_extension_ = new FreeBufferExtension;
+  v8::RegisterExtension(free_buffer_extension_);
+  gc_extension_ = new GCExtension(GCFunctionName());
+  v8::RegisterExtension(gc_extension_);
+  externalize_string_extension_ = new ExternalizeStringExtension;
+  v8::RegisterExtension(externalize_string_extension_);
+  statistics_extension_ = new StatisticsExtension;
+  v8::RegisterExtension(statistics_extension_);
+  trigger_failure_extension_ = new TriggerFailureExtension;
+  v8::RegisterExtension(trigger_failure_extension_);
+}
+
+
+void Bootstrapper::TearDownExtensions() {
+  delete free_buffer_extension_;
+  delete gc_extension_;
+  delete externalize_string_extension_;
+  delete statistics_extension_;
+  delete trigger_failure_extension_;
 }
 
 
@@ -120,7 +154,7 @@ char* Bootstrapper::AllocateAutoDeletedArray(int bytes) {
 void Bootstrapper::TearDown() {
   if (delete_these_non_arrays_on_tear_down_ != NULL) {
     int len = delete_these_non_arrays_on_tear_down_->length();
-    ASSERT(len < 20);  // Don't use this mechanism for unbounded allocations.
+    ASSERT(len < 24);  // Don't use this mechanism for unbounded allocations.
     for (int i = 0; i < len; i++) {
       delete delete_these_non_arrays_on_tear_down_->at(i);
       delete_these_non_arrays_on_tear_down_->at(i) = NULL;
@@ -199,6 +233,7 @@ class Genesis BASE_EMBEDDED {
   // Installs the contents of the native .js files on the global objects.
   // Used for creating a context from scratch.
   void InstallNativeFunctions();
+  void InstallExperimentalBuiltinFunctionIds();
   void InstallExperimentalNativeFunctions();
   Handle<JSFunction> InstallInternalArray(Handle<JSBuiltinsObject> builtins,
                                           const char* name,
@@ -231,13 +266,18 @@ class Genesis BASE_EMBEDDED {
   // provided.
   static bool InstallExtensions(Handle<Context> native_context,
                                 v8::ExtensionConfiguration* extensions);
+  static bool InstallAutoExtensions(Isolate* isolate,
+                                    ExtensionStates* extension_states);
+  static bool InstallRequestedExtensions(Isolate* isolate,
+                                         v8::ExtensionConfiguration* extensions,
+                                         ExtensionStates* extension_states);
   static bool InstallExtension(Isolate* isolate,
                                const char* name,
                                ExtensionStates* extension_states);
   static bool InstallExtension(Isolate* isolate,
                                v8::RegisteredExtension* current,
                                ExtensionStates* extension_states);
-  static void InstallSpecialObjects(Handle<Context> native_context);
+  static bool InstallSpecialObjects(Handle<Context> native_context);
   bool InstallJSBuiltins(Handle<JSBuiltinsObject> builtins);
   bool ConfigureApiObject(Handle<JSObject> object,
                           Handle<ObjectTemplateInfo> object_template);
@@ -262,7 +302,7 @@ class Genesis BASE_EMBEDDED {
                                      PrototypePropertyMode prototypeMode);
   void MakeFunctionInstancePrototypeWritable();
 
-  Handle<Map> CreateStrictModeFunctionMap(
+  Handle<Map> CreateStrictFunctionMap(
       PrototypePropertyMode prototype_mode,
       Handle<JSFunction> empty_function);
 
@@ -290,8 +330,8 @@ class Genesis BASE_EMBEDDED {
   // prototype for the processing of JS builtins. Later the function maps are
   // replaced in order to make prototype writable. These are the final, writable
   // prototype, maps.
-  Handle<Map> function_map_writable_prototype_;
-  Handle<Map> strict_mode_function_map_writable_prototype_;
+  Handle<Map> sloppy_function_map_writable_prototype_;
+  Handle<Map> strict_function_map_writable_prototype_;
   Handle<JSFunction> throw_type_error_function;
 
   BootstrapperActive active_;
@@ -334,17 +374,6 @@ void Bootstrapper::DetachGlobal(Handle<Context> env) {
   Handle<JSGlobalProxy> global_proxy(JSGlobalProxy::cast(env->global_proxy()));
   global_proxy->set_native_context(*factory->null_value());
   SetObjectPrototype(global_proxy, factory->null_value());
-  env->set_global_proxy(env->global_object());
-  env->global_object()->set_global_receiver(env->global_object());
-}
-
-
-void Bootstrapper::ReattachGlobal(Handle<Context> env,
-                                  Handle<JSGlobalProxy> global_proxy) {
-  env->global_object()->set_global_receiver(*global_proxy);
-  env->set_global_proxy(*global_proxy);
-  SetObjectPrototype(global_proxy, Handle<JSObject>(env->global_object()));
-  global_proxy->set_native_context(*env);
 }
 
 
@@ -447,18 +476,19 @@ Handle<JSFunction> Genesis::CreateEmptyFunction(Isolate* isolate) {
   // can not be used as constructors.
   Handle<Map> function_without_prototype_map =
       CreateFunctionMap(DONT_ADD_PROTOTYPE);
-  native_context()->set_function_without_prototype_map(
+  native_context()->set_sloppy_function_without_prototype_map(
       *function_without_prototype_map);
 
   // Allocate the function map. This map is temporary, used only for processing
   // of builtins.
   // Later the map is replaced with writable prototype map, allocated below.
   Handle<Map> function_map = CreateFunctionMap(ADD_READONLY_PROTOTYPE);
-  native_context()->set_function_map(*function_map);
+  native_context()->set_sloppy_function_map(*function_map);
 
   // The final map for functions. Writeable prototype.
   // This map is installed in MakeFunctionInstancePrototypeWritable.
-  function_map_writable_prototype_ = CreateFunctionMap(ADD_WRITEABLE_PROTOTYPE);
+  sloppy_function_map_writable_prototype_ =
+      CreateFunctionMap(ADD_WRITEABLE_PROTOTYPE);
 
   Factory* factory = isolate->factory();
 
@@ -492,7 +522,7 @@ Handle<JSFunction> Genesis::CreateEmptyFunction(Isolate* isolate) {
   Handle<String> empty_string =
       factory->InternalizeOneByteString(STATIC_ASCII_VECTOR("Empty"));
   Handle<JSFunction> empty_function =
-      factory->NewFunctionWithoutPrototype(empty_string, CLASSIC_MODE);
+      factory->NewFunctionWithoutPrototype(empty_string, SLOPPY);
 
   // --- E m p t y ---
   Handle<Code> code =
@@ -510,10 +540,10 @@ Handle<JSFunction> Genesis::CreateEmptyFunction(Isolate* isolate) {
   empty_function->shared()->DontAdaptArguments();
 
   // Set prototypes for the function maps.
-  native_context()->function_map()->set_prototype(*empty_function);
-  native_context()->function_without_prototype_map()->
+  native_context()->sloppy_function_map()->set_prototype(*empty_function);
+  native_context()->sloppy_function_without_prototype_map()->
       set_prototype(*empty_function);
-  function_map_writable_prototype_->set_prototype(*empty_function);
+  sloppy_function_map_writable_prototype_->set_prototype(*empty_function);
 
   // Allocate the function map first and then patch the prototype later
   Handle<Map> empty_function_map = CreateFunctionMap(DONT_ADD_PROTOTYPE);
@@ -549,7 +579,7 @@ void Genesis::SetStrictFunctionInstanceDescriptor(
     map->AppendDescriptor(&d, witness);
   }
   {  // Add name.
-    CallbacksDescriptor d(*factory()->name_string(), *name, rw_attribs);
+    CallbacksDescriptor d(*factory()->name_string(), *name, ro_attribs);
     map->AppendDescriptor(&d, witness);
   }
   {  // Add arguments.
@@ -577,11 +607,10 @@ Handle<JSFunction> Genesis::GetThrowTypeErrorFunction() {
     Handle<String> name = factory()->InternalizeOneByteString(
         STATIC_ASCII_VECTOR("ThrowTypeError"));
     throw_type_error_function =
-      factory()->NewFunctionWithoutPrototype(name, CLASSIC_MODE);
+      factory()->NewFunctionWithoutPrototype(name, SLOPPY);
     Handle<Code> code(isolate()->builtins()->builtin(
         Builtins::kStrictModePoisonPill));
-    throw_type_error_function->set_map(
-        native_context()->function_map());
+    throw_type_error_function->set_map(native_context()->sloppy_function_map());
     throw_type_error_function->set_code(*code);
     throw_type_error_function->shared()->set_code(*code);
     throw_type_error_function->shared()->DontAdaptArguments();
@@ -592,7 +621,7 @@ Handle<JSFunction> Genesis::GetThrowTypeErrorFunction() {
 }
 
 
-Handle<Map> Genesis::CreateStrictModeFunctionMap(
+Handle<Map> Genesis::CreateStrictFunctionMap(
     PrototypePropertyMode prototype_mode,
     Handle<JSFunction> empty_function) {
   Handle<Map> map = factory()->NewMap(JS_FUNCTION_TYPE, JSFunction::kSize);
@@ -605,28 +634,27 @@ Handle<Map> Genesis::CreateStrictModeFunctionMap(
 
 void Genesis::CreateStrictModeFunctionMaps(Handle<JSFunction> empty) {
   // Allocate map for the prototype-less strict mode instances.
-  Handle<Map> strict_mode_function_without_prototype_map =
-      CreateStrictModeFunctionMap(DONT_ADD_PROTOTYPE, empty);
-  native_context()->set_strict_mode_function_without_prototype_map(
-      *strict_mode_function_without_prototype_map);
+  Handle<Map> strict_function_without_prototype_map =
+      CreateStrictFunctionMap(DONT_ADD_PROTOTYPE, empty);
+  native_context()->set_strict_function_without_prototype_map(
+      *strict_function_without_prototype_map);
 
   // Allocate map for the strict mode functions. This map is temporary, used
   // only for processing of builtins.
   // Later the map is replaced with writable prototype map, allocated below.
-  Handle<Map> strict_mode_function_map =
-      CreateStrictModeFunctionMap(ADD_READONLY_PROTOTYPE, empty);
-  native_context()->set_strict_mode_function_map(
-      *strict_mode_function_map);
+  Handle<Map> strict_function_map =
+      CreateStrictFunctionMap(ADD_READONLY_PROTOTYPE, empty);
+  native_context()->set_strict_function_map(*strict_function_map);
 
   // The final map for the strict mode functions. Writeable prototype.
   // This map is installed in MakeFunctionInstancePrototypeWritable.
-  strict_mode_function_map_writable_prototype_ =
-      CreateStrictModeFunctionMap(ADD_WRITEABLE_PROTOTYPE, empty);
+  strict_function_map_writable_prototype_ =
+      CreateStrictFunctionMap(ADD_WRITEABLE_PROTOTYPE, empty);
 
   // Complete the callbacks.
-  PoisonArgumentsAndCaller(strict_mode_function_without_prototype_map);
-  PoisonArgumentsAndCaller(strict_mode_function_map);
-  PoisonArgumentsAndCaller(strict_mode_function_map_writable_prototype_);
+  PoisonArgumentsAndCaller(strict_function_without_prototype_map);
+  PoisonArgumentsAndCaller(strict_function_map);
+  PoisonArgumentsAndCaller(strict_function_map_writable_prototype_);
 }
 
 
@@ -677,7 +705,7 @@ void Genesis::CreateRoots() {
 
   // Allocate the message listeners object.
   {
-    v8::NeanderArray listeners;
+    v8::NeanderArray listeners(isolate());
     native_context()->set_message_listeners(*listeners.value());
   }
 }
@@ -1068,33 +1096,14 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
   }
 
   { // -- T y p e d A r r a y s
-    Handle<JSFunction> int8_fun = InstallTypedArray("Int8Array",
-        EXTERNAL_BYTE_ELEMENTS);
-    native_context()->set_int8_array_fun(*int8_fun);
-    Handle<JSFunction> uint8_fun = InstallTypedArray("Uint8Array",
-        EXTERNAL_UNSIGNED_BYTE_ELEMENTS);
-    native_context()->set_uint8_array_fun(*uint8_fun);
-    Handle<JSFunction> int16_fun = InstallTypedArray("Int16Array",
-        EXTERNAL_SHORT_ELEMENTS);
-    native_context()->set_int16_array_fun(*int16_fun);
-    Handle<JSFunction> uint16_fun = InstallTypedArray("Uint16Array",
-        EXTERNAL_UNSIGNED_SHORT_ELEMENTS);
-    native_context()->set_uint16_array_fun(*uint16_fun);
-    Handle<JSFunction> int32_fun = InstallTypedArray("Int32Array",
-        EXTERNAL_INT_ELEMENTS);
-    native_context()->set_int32_array_fun(*int32_fun);
-    Handle<JSFunction> uint32_fun = InstallTypedArray("Uint32Array",
-        EXTERNAL_UNSIGNED_INT_ELEMENTS);
-    native_context()->set_uint32_array_fun(*uint32_fun);
-    Handle<JSFunction> float_fun = InstallTypedArray("Float32Array",
-        EXTERNAL_FLOAT_ELEMENTS);
-    native_context()->set_float_array_fun(*float_fun);
-    Handle<JSFunction> double_fun = InstallTypedArray("Float64Array",
-        EXTERNAL_DOUBLE_ELEMENTS);
-    native_context()->set_double_array_fun(*double_fun);
-    Handle<JSFunction> uint8c_fun = InstallTypedArray("Uint8ClampedArray",
-        EXTERNAL_PIXEL_ELEMENTS);
-    native_context()->set_uint8c_array_fun(*uint8c_fun);
+#define INSTALL_TYPED_ARRAY(Type, type, TYPE, ctype, size)                    \
+    {                                                                         \
+      Handle<JSFunction> fun = InstallTypedArray(#Type "Array",               \
+          TYPE##_ELEMENTS);                                                   \
+      native_context()->set_##type##_array_fun(*fun);                         \
+    }
+    TYPED_ARRAYS(INSTALL_TYPED_ARRAY)
+#undef INSTALL_TYPED_ARRAY
 
     Handle<JSFunction> data_view_fun =
         InstallFunction(
@@ -1103,6 +1112,18 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
             isolate->initial_object_prototype(),
             Builtins::kIllegal, true, true);
     native_context()->set_data_view_fun(*data_view_fun);
+  }
+
+  {  // -- W e a k M a p
+    InstallFunction(global, "WeakMap", JS_WEAK_MAP_TYPE, JSWeakMap::kSize,
+                    isolate->initial_object_prototype(),
+                    Builtins::kIllegal, true, true);
+  }
+
+  {  // -- W e a k S e t
+    InstallFunction(global, "WeakSet", JS_WEAK_SET_TYPE, JSWeakSet::kSize,
+                    isolate->initial_object_prototype(),
+                    Builtins::kIllegal, true, true);
   }
 
   {  // --- arguments_boilerplate_
@@ -1129,7 +1150,7 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
     function->shared()->set_expected_nof_properties(2);
     Handle<JSObject> result = factory->NewJSObject(function);
 
-    native_context()->set_arguments_boilerplate(*result);
+    native_context()->set_sloppy_arguments_boilerplate(*result);
     // Note: length must be added as the first property and
     //       callee must be added as the second property.
     CHECK_NOT_EMPTY_HANDLE(isolate,
@@ -1165,22 +1186,23 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
   {  // --- aliased_arguments_boilerplate_
     // Set up a well-formed parameter map to make assertions happy.
     Handle<FixedArray> elements = factory->NewFixedArray(2);
-    elements->set_map(heap->non_strict_arguments_elements_map());
+    elements->set_map(heap->sloppy_arguments_elements_map());
     Handle<FixedArray> array;
     array = factory->NewFixedArray(0);
     elements->set(0, *array);
     array = factory->NewFixedArray(0);
     elements->set(1, *array);
 
-    Handle<Map> old_map(native_context()->arguments_boilerplate()->map());
+    Handle<Map> old_map(
+        native_context()->sloppy_arguments_boilerplate()->map());
     Handle<Map> new_map = factory->CopyMap(old_map);
     new_map->set_pre_allocated_property_fields(2);
     Handle<JSObject> result = factory->NewJSObjectFromMap(new_map);
     // Set elements kind after allocating the object because
     // NewJSObjectFromMap assumes a fast elements map.
-    new_map->set_elements_kind(NON_STRICT_ARGUMENTS_ELEMENTS);
+    new_map->set_elements_kind(SLOPPY_ARGUMENTS_ELEMENTS);
     result->set_elements(*elements);
-    ASSERT(result->HasNonStrictArgumentsElements());
+    ASSERT(result->HasSloppyArgumentsElements());
     native_context()->set_aliased_arguments_boilerplate(*result);
   }
 
@@ -1203,7 +1225,7 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
 
     // Create the map. Allocate one in-object field for length.
     Handle<Map> map = factory->NewMap(JS_OBJECT_TYPE,
-                                      Heap::kArgumentsObjectSizeStrict);
+                                      Heap::kStrictArgumentsObjectSize);
     // Create the descriptor array for the arguments object.
     Handle<DescriptorArray> descriptors = factory->NewDescriptorArray(0, 3);
     DescriptorArray::WhitenessWitness witness(*descriptors);
@@ -1232,13 +1254,13 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
     map->set_pre_allocated_property_fields(1);
     map->set_inobject_properties(1);
 
-    // Copy constructor from the non-strict arguments boilerplate.
+    // Copy constructor from the sloppy arguments boilerplate.
     map->set_constructor(
-      native_context()->arguments_boilerplate()->map()->constructor());
+      native_context()->sloppy_arguments_boilerplate()->map()->constructor());
 
     // Allocate the arguments boilerplate object.
     Handle<JSObject> result = factory->NewJSObjectFromMap(map);
-    native_context()->set_strict_mode_arguments_boilerplate(*result);
+    native_context()->set_strict_arguments_boilerplate(*result);
 
     // Add length property only for strict mode boilerplate.
     CHECK_NOT_EMPTY_HANDLE(isolate,
@@ -1302,16 +1324,9 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
     delegate->shared()->DontAdaptArguments();
   }
 
-  // Initialize the out of memory slot.
-  native_context()->set_out_of_memory(heap->false_value());
-
   // Initialize the embedder data slot.
-  Handle<FixedArray> embedder_data = factory->NewFixedArray(2);
+  Handle<FixedArray> embedder_data = factory->NewFixedArray(3);
   native_context()->set_embedder_data(*embedder_data);
-
-  // Allocate the random seed slot.
-  Handle<ByteArray> random_seed = factory->NewByteArray(kRandomStateSize);
-  native_context()->set_random_seed(*random_seed);
 }
 
 
@@ -1346,23 +1361,13 @@ void Genesis::InitializeExperimentalGlobal() {
   }
 
   if (FLAG_harmony_collections) {
-    {  // -- S e t
-      InstallFunction(global, "Set", JS_SET_TYPE, JSSet::kSize,
-                      isolate()->initial_object_prototype(),
-                      Builtins::kIllegal, true, true);
-    }
     {  // -- M a p
       InstallFunction(global, "Map", JS_MAP_TYPE, JSMap::kSize,
                       isolate()->initial_object_prototype(),
                       Builtins::kIllegal, true, true);
     }
-    {  // -- W e a k M a p
-      InstallFunction(global, "WeakMap", JS_WEAK_MAP_TYPE, JSWeakMap::kSize,
-                      isolate()->initial_object_prototype(),
-                      Builtins::kIllegal, true, true);
-    }
-    {  // -- W e a k S e t
-      InstallFunction(global, "WeakSet", JS_WEAK_SET_TYPE, JSWeakSet::kSize,
+    {  // -- S e t
+      InstallFunction(global, "Set", JS_SET_TYPE, JSSet::kSize,
                       isolate()->initial_object_prototype(),
                       Builtins::kIllegal, true, true);
     }
@@ -1385,18 +1390,19 @@ void Genesis::InitializeExperimentalGlobal() {
 
     // Create maps for generator functions and their prototypes.  Store those
     // maps in the native context.
-    Handle<Map> function_map(native_context()->function_map());
+    Handle<Map> function_map(native_context()->sloppy_function_map());
     Handle<Map> generator_function_map = factory()->CopyMap(function_map);
     generator_function_map->set_prototype(*generator_function_prototype);
-    native_context()->set_generator_function_map(*generator_function_map);
+    native_context()->set_sloppy_generator_function_map(
+        *generator_function_map);
 
     Handle<Map> strict_mode_function_map(
-        native_context()->strict_mode_function_map());
+        native_context()->strict_function_map());
     Handle<Map> strict_mode_generator_function_map = factory()->CopyMap(
         strict_mode_function_map);
     strict_mode_generator_function_map->set_prototype(
         *generator_function_prototype);
-    native_context()->set_strict_mode_generator_function_map(
+    native_context()->set_strict_generator_function_map(
         *strict_mode_generator_function_map);
 
     Handle<Map> object_map(native_context()->object_function()->initial_map());
@@ -1458,6 +1464,7 @@ bool Genesis::CompileExperimentalBuiltin(Isolate* isolate, int index) {
   Handle<String> source_code =
       factory->NewStringFromAscii(
           ExperimentalNatives::GetRawScriptSource(index));
+  RETURN_IF_EMPTY_HANDLE_VALUE(isolate, source_code, false);
   return CompileNative(isolate, name, source_code);
 }
 
@@ -1507,7 +1514,8 @@ bool Genesis::CompileScriptCached(Isolate* isolate,
   if (cache == NULL || !cache->Lookup(name, &function_info)) {
     ASSERT(source->IsOneByteRepresentation());
     Handle<String> script_name = factory->NewStringFromUtf8(name);
-    function_info = Compiler::Compile(
+    ASSERT(!script_name.is_null());
+    function_info = Compiler::CompileScript(
         source,
         script_name,
         0,
@@ -1516,7 +1524,7 @@ bool Genesis::CompileScriptCached(Isolate* isolate,
         top_context,
         extension,
         NULL,
-        Handle<String>::null(),
+        NO_CACHED_DATA,
         use_runtime_context ? NATIVES_CODE : NOT_NATIVES_CODE);
     if (function_info.is_null()) return false;
     if (cache != NULL) cache->Add(name, function_info);
@@ -1559,6 +1567,7 @@ bool Genesis::CompileScriptCached(Isolate* isolate,
 void Genesis::InstallNativeFunctions() {
   HandleScope scope(isolate());
   INSTALL_NATIVE(JSFunction, "CreateDate", create_date_fun);
+
   INSTALL_NATIVE(JSFunction, "ToNumber", to_number_fun);
   INSTALL_NATIVE(JSFunction, "ToString", to_string_fun);
   INSTALL_NATIVE(JSFunction, "ToDetailString", to_detail_string_fun);
@@ -1566,6 +1575,7 @@ void Genesis::InstallNativeFunctions() {
   INSTALL_NATIVE(JSFunction, "ToInteger", to_integer_fun);
   INSTALL_NATIVE(JSFunction, "ToUint32", to_uint32_fun);
   INSTALL_NATIVE(JSFunction, "ToInt32", to_int32_fun);
+
   INSTALL_NATIVE(JSFunction, "GlobalEval", global_eval_fun);
   INSTALL_NATIVE(JSFunction, "Instantiate", instantiate_fun);
   INSTALL_NATIVE(JSFunction, "ConfigureTemplateInstance",
@@ -1574,25 +1584,33 @@ void Genesis::InstallNativeFunctions() {
   INSTALL_NATIVE(JSObject, "functionCache", function_cache);
   INSTALL_NATIVE(JSFunction, "ToCompletePropertyDescriptor",
                  to_complete_property_descriptor);
+
+  INSTALL_NATIVE(JSFunction, "IsPromise", is_promise);
+  INSTALL_NATIVE(JSFunction, "PromiseCreate", promise_create);
+  INSTALL_NATIVE(JSFunction, "PromiseResolve", promise_resolve);
+  INSTALL_NATIVE(JSFunction, "PromiseReject", promise_reject);
+  INSTALL_NATIVE(JSFunction, "PromiseChain", promise_chain);
+  INSTALL_NATIVE(JSFunction, "PromiseCatch", promise_catch);
+
+  INSTALL_NATIVE(JSFunction, "NotifyChange", observers_notify_change);
+  INSTALL_NATIVE(JSFunction, "EnqueueSpliceRecord", observers_enqueue_splice);
+  INSTALL_NATIVE(JSFunction, "BeginPerformSplice",
+                 observers_begin_perform_splice);
+  INSTALL_NATIVE(JSFunction, "EndPerformSplice",
+                 observers_end_perform_splice);
 }
 
 
 void Genesis::InstallExperimentalNativeFunctions() {
+  INSTALL_NATIVE(JSFunction, "RunMicrotasks", run_microtasks);
+  INSTALL_NATIVE(JSFunction, "EnqueueExternalMicrotask",
+                 enqueue_external_microtask);
+
   if (FLAG_harmony_proxies) {
     INSTALL_NATIVE(JSFunction, "DerivedHasTrap", derived_has_trap);
     INSTALL_NATIVE(JSFunction, "DerivedGetTrap", derived_get_trap);
     INSTALL_NATIVE(JSFunction, "DerivedSetTrap", derived_set_trap);
     INSTALL_NATIVE(JSFunction, "ProxyEnumerate", proxy_enumerate);
-  }
-  if (FLAG_harmony_observation) {
-    INSTALL_NATIVE(JSFunction, "NotifyChange", observers_notify_change);
-    INSTALL_NATIVE(JSFunction, "EnqueueSpliceRecord", observers_enqueue_splice);
-    INSTALL_NATIVE(JSFunction, "BeginPerformSplice",
-                   observers_begin_perform_splice);
-    INSTALL_NATIVE(JSFunction, "EndPerformSplice",
-                   observers_end_perform_splice);
-    INSTALL_NATIVE(JSFunction, "DeliverChangeRecords",
-                   observers_deliver_changes);
   }
 }
 
@@ -1678,6 +1696,8 @@ bool Genesis::InstallNatives() {
   builtins->set_native_context(*native_context());
   builtins->set_global_context(*native_context());
   builtins->set_global_receiver(*builtins);
+  builtins->set_global_receiver(native_context()->global_proxy());
+
 
   // Set up the 'global' properties of the builtins object. The
   // 'global' property that refers to the global object is the only
@@ -1691,6 +1711,11 @@ bool Genesis::InstallNatives() {
   CHECK_NOT_EMPTY_HANDLE(isolate(),
                          JSObject::SetLocalPropertyIgnoreAttributes(
                              builtins, global_string, global_obj, attributes));
+  Handle<String> builtins_string =
+      factory()->InternalizeOneByteString(STATIC_ASCII_VECTOR("builtins"));
+  CHECK_NOT_EMPTY_HANDLE(isolate(),
+                         JSObject::SetLocalPropertyIgnoreAttributes(
+                             builtins, builtins_string, builtins, attributes));
 
   // Set up the reference from the global object to the builtins object.
   JSGlobalObject::cast(native_context()->global_object())->
@@ -1742,9 +1767,6 @@ bool Genesis::InstallNatives() {
             STATIC_ASCII_VECTOR("column_offset")));
     Handle<Foreign> script_column_offset(
         factory()->NewForeign(&Accessors::ScriptColumnOffset));
-    Handle<String> data_string(factory()->InternalizeOneByteString(
-        STATIC_ASCII_VECTOR("data")));
-    Handle<Foreign> script_data(factory()->NewForeign(&Accessors::ScriptData));
     Handle<String> type_string(factory()->InternalizeOneByteString(
         STATIC_ASCII_VECTOR("type")));
     Handle<Foreign> script_type(factory()->NewForeign(&Accessors::ScriptType));
@@ -1805,11 +1827,6 @@ bool Genesis::InstallNatives() {
     {
       CallbacksDescriptor d(
           *column_offset_string, *script_column_offset, attribs);
-      script_map->AppendDescriptor(&d, witness);
-    }
-
-    {
-      CallbacksDescriptor d(*data_string, *script_data, attribs);
       script_map->AppendDescriptor(&d, witness);
     }
 
@@ -2023,59 +2040,30 @@ bool Genesis::InstallNatives() {
 }
 
 
+#define INSTALL_EXPERIMENTAL_NATIVE(i, flag, file)                \
+  if (FLAG_harmony_##flag &&                                      \
+      strcmp(ExperimentalNatives::GetScriptName(i).start(),       \
+          "native " file) == 0) {                                 \
+    if (!CompileExperimentalBuiltin(isolate(), i)) return false;  \
+  }
+
+
 bool Genesis::InstallExperimentalNatives() {
   for (int i = ExperimentalNatives::GetDebuggerCount();
        i < ExperimentalNatives::GetBuiltinsCount();
        i++) {
-    if (FLAG_harmony_symbols &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native symbol.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_proxies &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native proxy.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_collections &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native collection.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_observation &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native object-observe.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_generators &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native generator.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_iteration &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native array-iterator.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_strings &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native harmony-string.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_arrays &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native harmony-array.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
-    if (FLAG_harmony_maths &&
-        strcmp(ExperimentalNatives::GetScriptName(i).start(),
-               "native harmony-math.js") == 0) {
-      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
-    }
+    INSTALL_EXPERIMENTAL_NATIVE(i, symbols, "symbol.js")
+    INSTALL_EXPERIMENTAL_NATIVE(i, proxies, "proxy.js")
+    INSTALL_EXPERIMENTAL_NATIVE(i, collections, "collection.js")
+    INSTALL_EXPERIMENTAL_NATIVE(i, generators, "generator.js")
+    INSTALL_EXPERIMENTAL_NATIVE(i, iteration, "array-iterator.js")
+    INSTALL_EXPERIMENTAL_NATIVE(i, strings, "harmony-string.js")
+    INSTALL_EXPERIMENTAL_NATIVE(i, arrays, "harmony-array.js")
+    INSTALL_EXPERIMENTAL_NATIVE(i, maths, "harmony-math.js")
   }
 
   InstallExperimentalNativeFunctions();
-
+  InstallExperimentalBuiltinFunctionIds();
   return true;
 }
 
@@ -2094,8 +2082,10 @@ static Handle<JSObject> ResolveBuiltinIdHolder(
   ASSERT_EQ(".prototype", period_pos);
   Vector<const char> property(holder_expr,
                               static_cast<int>(period_pos - holder_expr));
+  Handle<String> property_string = factory->InternalizeUtf8String(property);
+  ASSERT(!property_string.is_null());
   Handle<JSFunction> function = Handle<JSFunction>::cast(
-      GetProperty(isolate, global, factory->InternalizeUtf8String(property)));
+      GetProperty(isolate, global, property_string));
   return Handle<JSObject>(JSObject::cast(function->prototype()));
 }
 
@@ -2122,6 +2112,15 @@ void Genesis::InstallBuiltinFunctionIds() {
   }
   FUNCTIONS_WITH_ID_LIST(INSTALL_BUILTIN_ID)
 #undef INSTALL_BUILTIN_ID
+}
+
+
+void Genesis::InstallExperimentalBuiltinFunctionIds() {
+  HandleScope scope(isolate());
+  if (FLAG_harmony_maths) {
+    Handle<JSObject> holder = ResolveBuiltinIdHolder(native_context(), "Math");
+    InstallBuiltinFunctionId(holder, "clz32", kMathClz32);
+  }
 }
 
 
@@ -2181,13 +2180,12 @@ bool Bootstrapper::InstallExtensions(Handle<Context> native_context,
   BootstrapperActive active(this);
   SaveContext saved_context(isolate_);
   isolate_->set_context(*native_context);
-  if (!Genesis::InstallExtensions(native_context, extensions)) return false;
-  Genesis::InstallSpecialObjects(native_context);
-  return true;
+  return Genesis::InstallExtensions(native_context, extensions) &&
+      Genesis::InstallSpecialObjects(native_context);
 }
 
 
-void Genesis::InstallSpecialObjects(Handle<Context> native_context) {
+bool Genesis::InstallSpecialObjects(Handle<Context> native_context) {
   Isolate* isolate = native_context->GetIsolate();
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
@@ -2197,11 +2195,9 @@ void Genesis::InstallSpecialObjects(Handle<Context> native_context) {
   if (FLAG_expose_natives_as != NULL && strlen(FLAG_expose_natives_as) != 0) {
     Handle<String> natives =
         factory->InternalizeUtf8String(FLAG_expose_natives_as);
-    CHECK_NOT_EMPTY_HANDLE(isolate,
-                           JSObject::SetLocalPropertyIgnoreAttributes(
-                               global, natives,
-                               Handle<JSObject>(global->builtins()),
-                               DONT_ENUM));
+    JSObject::SetLocalPropertyIgnoreAttributes(
+        global, natives, Handle<JSObject>(global->builtins()), DONT_ENUM);
+    if (isolate->has_pending_exception()) return false;
   }
 
   Handle<Object> Error = GetProperty(global, "Error");
@@ -2210,10 +2206,9 @@ void Genesis::InstallSpecialObjects(Handle<Context> native_context) {
         STATIC_ASCII_VECTOR("stackTraceLimit"));
     Handle<Smi> stack_trace_limit(
         Smi::FromInt(FLAG_stack_trace_limit), isolate);
-    CHECK_NOT_EMPTY_HANDLE(isolate,
-                           JSObject::SetLocalPropertyIgnoreAttributes(
-                               Handle<JSObject>::cast(Error), name,
-                               stack_trace_limit, NONE));
+    JSObject::SetLocalPropertyIgnoreAttributes(
+        Handle<JSObject>::cast(Error), name, stack_trace_limit, NONE);
+    if (isolate->has_pending_exception()) return false;
   }
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
@@ -2222,7 +2217,7 @@ void Genesis::InstallSpecialObjects(Handle<Context> native_context) {
     Debug* debug = isolate->debug();
     // If loading fails we just bail out without installing the
     // debugger but without tanking the whole context.
-    if (!debug->Load()) return;
+    if (!debug->Load()) return true;
     // Set the security token for the debugger context to the same as
     // the shell native context to allow calling between these (otherwise
     // exposing debug global object doesn't make much sense).
@@ -2233,11 +2228,12 @@ void Genesis::InstallSpecialObjects(Handle<Context> native_context) {
         factory->InternalizeUtf8String(FLAG_expose_debug_as);
     Handle<Object> global_proxy(
         debug->debug_context()->global_proxy(), isolate);
-    CHECK_NOT_EMPTY_HANDLE(isolate,
-                           JSObject::SetLocalPropertyIgnoreAttributes(
-                               global, debug_string, global_proxy, DONT_ENUM));
+    JSObject::SetLocalPropertyIgnoreAttributes(
+        global, debug_string, global_proxy, DONT_ENUM);
+    if (isolate->has_pending_exception()) return false;
   }
 #endif
+  return true;
 }
 
 
@@ -2269,35 +2265,46 @@ void Genesis::ExtensionStates::set_state(RegisteredExtension* extension,
       reinterpret_cast<void*>(static_cast<intptr_t>(state));
 }
 
+
 bool Genesis::InstallExtensions(Handle<Context> native_context,
                                 v8::ExtensionConfiguration* extensions) {
   Isolate* isolate = native_context->GetIsolate();
   ExtensionStates extension_states;  // All extensions have state UNVISITED.
-  // Install auto extensions.
-  v8::RegisteredExtension* current = v8::RegisteredExtension::first_extension();
-  while (current != NULL) {
-    if (current->extension()->auto_enable())
-      InstallExtension(isolate, current, &extension_states);
-    current = current->next();
-  }
+  return InstallAutoExtensions(isolate, &extension_states) &&
+      (!FLAG_expose_free_buffer ||
+       InstallExtension(isolate, "v8/free-buffer", &extension_states)) &&
+      (!FLAG_expose_gc ||
+       InstallExtension(isolate, "v8/gc", &extension_states)) &&
+      (!FLAG_expose_externalize_string ||
+       InstallExtension(isolate, "v8/externalize", &extension_states)) &&
+      (!FLAG_track_gc_object_stats ||
+       InstallExtension(isolate, "v8/statistics", &extension_states)) &&
+      (!FLAG_expose_trigger_failure ||
+       InstallExtension(isolate, "v8/trigger-failure", &extension_states)) &&
+      InstallRequestedExtensions(isolate, extensions, &extension_states);
+}
 
-  if (FLAG_expose_gc) InstallExtension(isolate, "v8/gc", &extension_states);
-  if (FLAG_expose_externalize_string) {
-    InstallExtension(isolate, "v8/externalize", &extension_states);
-  }
-  if (FLAG_track_gc_object_stats) {
-    InstallExtension(isolate, "v8/statistics", &extension_states);
-  }
 
-  if (extensions == NULL) return true;
-  // Install required extensions
-  int count = v8::ImplementationUtilities::GetNameCount(extensions);
-  const char** names = v8::ImplementationUtilities::GetNames(extensions);
-  for (int i = 0; i < count; i++) {
-    if (!InstallExtension(isolate, names[i], &extension_states))
+bool Genesis::InstallAutoExtensions(Isolate* isolate,
+                                    ExtensionStates* extension_states) {
+  for (v8::RegisteredExtension* it = v8::RegisteredExtension::first_extension();
+       it != NULL;
+       it = it->next()) {
+    if (it->extension()->auto_enable() &&
+        !InstallExtension(isolate, it, extension_states)) {
       return false;
+    }
   }
+  return true;
+}
 
+
+bool Genesis::InstallRequestedExtensions(Isolate* isolate,
+                                         v8::ExtensionConfiguration* extensions,
+                                         ExtensionStates* extension_states) {
+  for (const char** it = extensions->begin(); it != extensions->end(); ++it) {
+    if (!InstallExtension(isolate, *it, extension_states)) return false;
+  }
   return true;
 }
 
@@ -2307,19 +2314,16 @@ bool Genesis::InstallExtensions(Handle<Context> native_context,
 bool Genesis::InstallExtension(Isolate* isolate,
                                const char* name,
                                ExtensionStates* extension_states) {
-  v8::RegisteredExtension* current = v8::RegisteredExtension::first_extension();
-  // Loop until we find the relevant extension
-  while (current != NULL) {
-    if (strcmp(name, current->extension()->name()) == 0) break;
-    current = current->next();
+  for (v8::RegisteredExtension* it = v8::RegisteredExtension::first_extension();
+       it != NULL;
+       it = it->next()) {
+    if (strcmp(name, it->extension()->name()) == 0) {
+      return InstallExtension(isolate, it, extension_states);
+    }
   }
-  // Didn't find the extension; fail.
-  if (current == NULL) {
-    v8::Utils::ReportApiFailure(
-        "v8::Context::New()", "Cannot find required extension");
-    return false;
-  }
-  return InstallExtension(isolate, current, extension_states);
+  return Utils::ApiCheck(false,
+                         "v8::Context::New()",
+                         "Cannot find required extension");
 }
 
 
@@ -2331,9 +2335,9 @@ bool Genesis::InstallExtension(Isolate* isolate,
   if (extension_states->get_state(current) == INSTALLED) return true;
   // The current node has already been visited so there must be a
   // cycle in the dependency graph; fail.
-  if (extension_states->get_state(current) == VISITED) {
-    v8::Utils::ReportApiFailure(
-        "v8::Context::New()", "Circular extension dependency");
+  if (!Utils::ApiCheck(extension_states->get_state(current) != VISITED,
+                       "v8::Context::New()",
+                       "Circular extension dependency")) {
     return false;
   }
   ASSERT(extension_states->get_state(current) == UNVISITED);
@@ -2349,6 +2353,8 @@ bool Genesis::InstallExtension(Isolate* isolate,
   }
   Handle<String> source_code =
       isolate->factory()->NewExternalStringFromAscii(extension->source());
+  // We do not expect this to throw an exception. Change this if it does.
+  CHECK_NOT_EMPTY_HANDLE(isolate, source_code);
   bool result = CompileScriptCached(isolate,
                                     CStrVector(extension->name()),
                                     source_code,
@@ -2382,7 +2388,7 @@ bool Genesis::InstallJSBuiltins(Handle<JSBuiltinsObject> builtins) {
     Handle<JSFunction> function
         = Handle<JSFunction>(JSFunction::cast(function_object));
     builtins->set_javascript_builtin(id, *function);
-    if (!JSFunction::CompileLazy(function, CLEAR_EXCEPTION)) {
+    if (!Compiler::EnsureCompiled(function, CLEAR_EXCEPTION)) {
       return false;
     }
     builtins->set_javascript_builtin_code(id, function->shared()->code());
@@ -2426,8 +2432,8 @@ bool Genesis::ConfigureGlobalObjects(
 bool Genesis::ConfigureApiObject(Handle<JSObject> object,
     Handle<ObjectTemplateInfo> object_template) {
   ASSERT(!object_template.is_null());
-  ASSERT(object->IsInstanceOf(
-      FunctionTemplateInfo::cast(object_template->constructor())));
+  ASSERT(FunctionTemplateInfo::cast(object_template->constructor())
+             ->IsTemplateFor(object->map()));;
 
   bool pending_exception = false;
   Handle<JSObject> obj =
@@ -2559,14 +2565,35 @@ void Genesis::MakeFunctionInstancePrototypeWritable() {
   // The maps with writable prototype are created in CreateEmptyFunction
   // and CreateStrictModeFunctionMaps respectively. Initially the maps are
   // created with read-only prototype for JS builtins processing.
-  ASSERT(!function_map_writable_prototype_.is_null());
-  ASSERT(!strict_mode_function_map_writable_prototype_.is_null());
+  ASSERT(!sloppy_function_map_writable_prototype_.is_null());
+  ASSERT(!strict_function_map_writable_prototype_.is_null());
 
   // Replace function instance maps to make prototype writable.
-  native_context()->set_function_map(*function_map_writable_prototype_);
-  native_context()->set_strict_mode_function_map(
-      *strict_mode_function_map_writable_prototype_);
+  native_context()->set_sloppy_function_map(
+      *sloppy_function_map_writable_prototype_);
+  native_context()->set_strict_function_map(
+      *strict_function_map_writable_prototype_);
 }
+
+
+class NoTrackDoubleFieldsForSerializerScope {
+ public:
+  NoTrackDoubleFieldsForSerializerScope() : flag_(FLAG_track_double_fields) {
+    if (Serializer::enabled()) {
+      // Disable tracking double fields because heap numbers treated as
+      // immutable by the serializer.
+      FLAG_track_double_fields = false;
+    }
+  }
+  ~NoTrackDoubleFieldsForSerializerScope() {
+    if (Serializer::enabled()) {
+      FLAG_track_double_fields = flag_;
+    }
+  }
+
+ private:
+  bool flag_;
+};
 
 
 Genesis::Genesis(Isolate* isolate,
@@ -2575,6 +2602,7 @@ Genesis::Genesis(Isolate* isolate,
                  v8::ExtensionConfiguration* extensions)
     : isolate_(isolate),
       active_(isolate->bootstrapper()) {
+  NoTrackDoubleFieldsForSerializerScope disable_double_tracking_for_serializer;
   result_ = Handle<Context>::null();
   // If V8 cannot be initialized, just return.
   if (!V8::Initialize(NULL)) return;
@@ -2609,6 +2637,8 @@ Genesis::Genesis(Isolate* isolate,
 
     HookUpGlobalProxy(inner_global, global_proxy);
     HookUpInnerGlobal(inner_global);
+    native_context()->builtins()->set_global_receiver(
+        native_context()->global_proxy());
 
     if (!ConfigureGlobalObjects(global_template)) return;
   } else {
@@ -2635,13 +2665,67 @@ Genesis::Genesis(Isolate* isolate,
   InitializeExperimentalGlobal();
   if (!InstallExperimentalNatives()) return;
 
-  // Initially seed the per-context random number generator
-  // using the per-isolate random number generator.
-  uint32_t* state = reinterpret_cast<uint32_t*>(
-      native_context()->random_seed()->GetDataStartAddress());
-  do {
-    isolate->random_number_generator()->NextBytes(state, kRandomStateSize);
-  } while (state[0] == 0 || state[1] == 0);
+  // We can't (de-)serialize typed arrays currently, but we are lucky: The state
+  // of the random number generator needs no initialization during snapshot
+  // creation time and we don't need trigonometric functions then.
+  if (!Serializer::enabled()) {
+    // Initially seed the per-context random number generator using the
+    // per-isolate random number generator.
+    const int num_elems = 2;
+    const int num_bytes = num_elems * sizeof(uint32_t);
+    uint32_t* state = reinterpret_cast<uint32_t*>(malloc(num_bytes));
+
+    do {
+      isolate->random_number_generator()->NextBytes(state, num_bytes);
+    } while (state[0] == 0 || state[1] == 0);
+
+    v8::Local<v8::ArrayBuffer> buffer = v8::ArrayBuffer::New(
+        reinterpret_cast<v8::Isolate*>(isolate), state, num_bytes);
+    Utils::OpenHandle(*buffer)->set_should_be_freed(true);
+    v8::Local<v8::Uint32Array> ta = v8::Uint32Array::New(buffer, 0, num_elems);
+    Handle<JSBuiltinsObject> builtins(native_context()->builtins());
+    ForceSetProperty(builtins,
+                     factory()->InternalizeOneByteString(
+                         STATIC_ASCII_VECTOR("rngstate")),
+                     Utils::OpenHandle(*ta),
+                     NONE);
+
+    // Initialize trigonometric lookup tables and constants.
+    const int table_num_bytes = TrigonometricLookupTable::table_num_bytes();
+    v8::Local<v8::ArrayBuffer> sin_buffer = v8::ArrayBuffer::New(
+        reinterpret_cast<v8::Isolate*>(isolate),
+        TrigonometricLookupTable::sin_table(), table_num_bytes);
+    v8::Local<v8::ArrayBuffer> cos_buffer = v8::ArrayBuffer::New(
+        reinterpret_cast<v8::Isolate*>(isolate),
+        TrigonometricLookupTable::cos_x_interval_table(), table_num_bytes);
+    v8::Local<v8::Float64Array> sin_table = v8::Float64Array::New(
+        sin_buffer, 0, TrigonometricLookupTable::table_size());
+    v8::Local<v8::Float64Array> cos_table = v8::Float64Array::New(
+        cos_buffer, 0, TrigonometricLookupTable::table_size());
+
+    ForceSetProperty(builtins,
+                     factory()->InternalizeOneByteString(
+                         STATIC_ASCII_VECTOR("kSinTable")),
+                     Utils::OpenHandle(*sin_table),
+                     NONE);
+    ForceSetProperty(builtins,
+                     factory()->InternalizeOneByteString(
+                         STATIC_ASCII_VECTOR("kCosXIntervalTable")),
+                     Utils::OpenHandle(*cos_table),
+                     NONE);
+    ForceSetProperty(builtins,
+                     factory()->InternalizeOneByteString(
+                         STATIC_ASCII_VECTOR("kSamples")),
+                     factory()->NewHeapNumber(
+                         TrigonometricLookupTable::samples()),
+                     NONE);
+    ForceSetProperty(builtins,
+                     factory()->InternalizeOneByteString(
+                         STATIC_ASCII_VECTOR("kIndexConvert")),
+                     factory()->NewHeapNumber(
+                         TrigonometricLookupTable::samples_over_pi_half()),
+                     NONE);
+  }
 
   result_ = native_context();
 }

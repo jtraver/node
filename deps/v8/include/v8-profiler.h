@@ -35,6 +35,9 @@
  */
 namespace v8 {
 
+class HeapGraphNode;
+struct HeapStatsUpdate;
+
 typedef uint32_t SnapshotObjectId;
 
 /**
@@ -96,9 +99,6 @@ class V8_EXPORT CpuProfileNode {
  */
 class V8_EXPORT CpuProfile {
  public:
-  /** Returns CPU profile UID (assigned by the profiler.) */
-  unsigned GetUid() const;
-
   /** Returns CPU profile title. */
   Handle<String> GetTitle() const;
 
@@ -132,10 +132,6 @@ class V8_EXPORT CpuProfile {
   /**
    * Deletes the profile and removes it from CpuProfiler's list.
    * All pointers to nodes previously returned become invalid.
-   * Profiles with the same uid but obtained using different
-   * security token are not deleted, but become inaccessible
-   * using FindProfile method. It is embedder's responsibility
-   * to call Delete on these profiles.
    */
   void Delete();
 };
@@ -155,15 +151,6 @@ class V8_EXPORT CpuProfiler {
   void SetSamplingInterval(int us);
 
   /**
-   * Returns the number of profiles collected (doesn't include
-   * profiles that are being collected at the moment of call.)
-   */
-  int GetProfileCount();
-
-  /** Returns a profile by index. */
-  const CpuProfile* GetCpuProfile(int index);
-
-  /**
    * Starts collecting CPU profile. Title may be an empty string. It
    * is allowed to have several profiles being collected at
    * once. Attempts to start collecting several profiles with the same
@@ -174,20 +161,19 @@ class V8_EXPORT CpuProfiler {
    * |record_samples| parameter controls whether individual samples should
    * be recorded in addition to the aggregated tree.
    */
+  void StartProfiling(Handle<String> title, bool record_samples = false);
+
+  /** Deprecated. Use StartProfiling instead. */
   void StartCpuProfiling(Handle<String> title, bool record_samples = false);
 
   /**
    * Stops collecting CPU profile with a given title and returns it.
    * If the title given is empty, finishes the last profile started.
    */
-  const CpuProfile* StopCpuProfiling(Handle<String> title);
+  CpuProfile* StopProfiling(Handle<String> title);
 
-  /**
-   * Deletes all existing profiles, also cancelling all profiling
-   * activity.  All previously returned pointers to profiles and their
-   * contents become invalid after this call.
-   */
-  void DeleteAllCpuProfiles();
+  /** Deprecated. Use StopProfiling instead. */
+  const CpuProfile* StopCpuProfiling(Handle<String> title);
 
   /**
    * Tells the profiler whether the embedder is idle.
@@ -200,9 +186,6 @@ class V8_EXPORT CpuProfiler {
   CpuProfiler(const CpuProfiler&);
   CpuProfiler& operator=(const CpuProfiler&);
 };
-
-
-class HeapGraphNode;
 
 
 /**
@@ -280,19 +263,48 @@ class V8_EXPORT HeapGraphNode {
   SnapshotObjectId GetId() const;
 
   /** Returns node's own size, in bytes. */
-  int GetSelfSize() const;
+  V8_DEPRECATED("Use GetShallowSize instead",
+                int GetSelfSize() const);
+
+  /** Returns node's own size, in bytes. */
+  size_t GetShallowSize() const;
 
   /** Returns child nodes count of the node. */
   int GetChildrenCount() const;
 
   /** Retrieves a child by index. */
   const HeapGraphEdge* GetChild(int index) const;
+};
 
+
+/**
+ * An interface for exporting data from V8, using "push" model.
+ */
+class V8_EXPORT OutputStream {  // NOLINT
+ public:
+  enum WriteResult {
+    kContinue = 0,
+    kAbort = 1
+  };
+  virtual ~OutputStream() {}
+  /** Notify about the end of stream. */
+  virtual void EndOfStream() = 0;
+  /** Get preferred output chunk size. Called only once. */
+  virtual int GetChunkSize() { return 1024; }
   /**
-   * Finds and returns a value from the heap corresponding to this node,
-   * if the value is still reachable.
+   * Writes the next chunk of snapshot data into the stream. Writing
+   * can be stopped by returning kAbort as function result. EndOfStream
+   * will not be called in case writing was aborted.
    */
-  Handle<Value> GetHeapValue() const;
+  virtual WriteResult WriteAsciiChunk(char* data, int size) = 0;
+  /**
+   * Writes the next chunk of heap stats data into the stream. Writing
+   * can be stopped by returning kAbort as function result. EndOfStream
+   * will not be called in case writing was aborted.
+   */
+  virtual WriteResult WriteHeapStatsChunk(HeapStatsUpdate* data, int count) {
+    return kAbort;
+  };
 };
 
 
@@ -363,7 +375,24 @@ class V8_EXPORT HeapSnapshot {
 };
 
 
-class RetainedObjectInfo;
+/**
+ * An interface for reporting progress and controlling long-running
+ * activities.
+ */
+class V8_EXPORT ActivityControl {  // NOLINT
+ public:
+  enum ControlOption {
+    kContinue = 0,
+    kAbort = 1
+  };
+  virtual ~ActivityControl() {}
+  /**
+   * Notify about current progress. The activity can be stopped by
+   * returning kAbort as the callback result.
+   */
+  virtual ControlOption ReportProgressValue(int done, int total) = 0;
+};
+
 
 /**
  * Interface for controlling heap profiling. Instance of the
@@ -391,6 +420,19 @@ class V8_EXPORT HeapProfiler {
    * it has been seen by the heap profiler, kUnknownObjectId otherwise.
    */
   SnapshotObjectId GetObjectId(Handle<Value> value);
+
+  /**
+   * Returns heap object with given SnapshotObjectId if the object is alive,
+   * otherwise empty handle is returned.
+   */
+  Handle<Value> FindObjectById(SnapshotObjectId id);
+
+  /**
+   * Clears internal map from SnapshotObjectId to heap object. The new objects
+   * will not be added into it unless a heap snapshot is taken or heap object
+   * tracking is kicked off.
+   */
+  void ClearObjectIds();
 
   /**
    * A constant for invalid SnapshotObjectId. GetSnapshotObjectId will return
@@ -425,8 +467,12 @@ class V8_EXPORT HeapProfiler {
    * Starts tracking of heap objects population statistics. After calling
    * this method, all heap objects relocations done by the garbage collector
    * are being registered.
+   *
+   * |track_allocations| parameter controls whether stack trace of each
+   * allocation in the heap will be recorded and reported as part of
+   * HeapSnapshot.
    */
-  void StartTrackingHeapObjects();
+  void StartTrackingHeapObjects(bool track_allocations = false);
 
   /**
    * Adds a new time interval entry to the aggregated statistics array. The
@@ -474,19 +520,6 @@ class V8_EXPORT HeapProfiler {
    * Sets a RetainedObjectInfo for an object group (see V8::SetObjectGroupId).
    */
   void SetRetainedObjectInfo(UniqueId id, RetainedObjectInfo* info);
-
-  /**
-   * Starts recording JS allocations immediately as they arrive and tracking of
-   * heap objects population statistics.
-   */
-  void StartRecordingHeapAllocations();
-
-  /**
-   * Stops recording JS allocations and tracking of heap objects population
-   * statistics, cleans all collected heap objects population statistics data.
-   */
-  void StopRecordingHeapAllocations();
-
 
  private:
   HeapProfiler();

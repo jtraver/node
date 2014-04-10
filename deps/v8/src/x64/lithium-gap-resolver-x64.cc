@@ -172,23 +172,23 @@ void LGapResolver::EmitMove(int index) {
     Register src = cgen_->ToRegister(source);
     if (destination->IsRegister()) {
       Register dst = cgen_->ToRegister(destination);
-      __ movq(dst, src);
+      __ movp(dst, src);
     } else {
       ASSERT(destination->IsStackSlot());
       Operand dst = cgen_->ToOperand(destination);
-      __ movq(dst, src);
+      __ movp(dst, src);
     }
 
   } else if (source->IsStackSlot()) {
     Operand src = cgen_->ToOperand(source);
     if (destination->IsRegister()) {
       Register dst = cgen_->ToRegister(destination);
-      __ movq(dst, src);
+      __ movp(dst, src);
     } else {
       ASSERT(destination->IsStackSlot());
       Operand dst = cgen_->ToOperand(destination);
-      __ movq(kScratchRegister, src);
-      __ movq(dst, kScratchRegister);
+      __ movp(kScratchRegister, src);
+      __ movp(dst, kScratchRegister);
     }
 
   } else if (source->IsConstantOperand()) {
@@ -198,7 +198,14 @@ void LGapResolver::EmitMove(int index) {
       if (cgen_->IsSmiConstant(constant_source)) {
         __ Move(dst, cgen_->ToSmi(constant_source));
       } else if (cgen_->IsInteger32Constant(constant_source)) {
-        __ movl(dst, Immediate(cgen_->ToInteger32(constant_source)));
+        int32_t constant = cgen_->ToInteger32(constant_source);
+        // Do sign extension only for constant used as de-hoisted array key.
+        // Others only need zero extension, which saves 2 bytes.
+        if (cgen_->IsDehoistedKeyConstant(constant_source)) {
+          __ Set(dst, constant);
+        } else {
+          __ Set(dst, static_cast<uint32_t>(constant));
+        }
       } else {
         __ Move(dst, cgen_->ToHandle(constant_source));
       }
@@ -209,7 +216,7 @@ void LGapResolver::EmitMove(int index) {
       if (int_val == 0) {
         __ xorps(dst, dst);
       } else {
-        __ movq(kScratchRegister, int_val, RelocInfo::NONE64);
+        __ Set(kScratchRegister, int_val);
         __ movq(dst, kScratchRegister);
       }
     } else {
@@ -218,12 +225,11 @@ void LGapResolver::EmitMove(int index) {
       if (cgen_->IsSmiConstant(constant_source)) {
         __ Move(dst, cgen_->ToSmi(constant_source));
       } else if (cgen_->IsInteger32Constant(constant_source)) {
-        // Zero top 32 bits of a 64 bit spill slot that holds a 32 bit untagged
-        // value.
-        __ movq(dst, Immediate(cgen_->ToInteger32(constant_source)));
+        // Do sign extension to 64 bits when stored into stack slot.
+        __ movp(dst, Immediate(cgen_->ToInteger32(constant_source)));
       } else {
         __ Move(kScratchRegister, cgen_->ToHandle(constant_source));
-        __ movq(dst, kScratchRegister);
+        __ movp(dst, kScratchRegister);
       }
     }
 
@@ -271,9 +277,9 @@ void LGapResolver::EmitSwap(int index) {
         cgen_->ToRegister(source->IsRegister() ? source : destination);
     Operand mem =
         cgen_->ToOperand(source->IsRegister() ? destination : source);
-    __ movq(kScratchRegister, mem);
-    __ movq(mem, reg);
-    __ movq(reg, kScratchRegister);
+    __ movp(kScratchRegister, mem);
+    __ movp(mem, reg);
+    __ movp(reg, kScratchRegister);
 
   } else if ((source->IsStackSlot() && destination->IsStackSlot()) ||
       (source->IsDoubleStackSlot() && destination->IsDoubleStackSlot())) {
@@ -281,9 +287,9 @@ void LGapResolver::EmitSwap(int index) {
     Operand src = cgen_->ToOperand(source);
     Operand dst = cgen_->ToOperand(destination);
     __ movsd(xmm0, src);
-    __ movq(kScratchRegister, dst);
+    __ movp(kScratchRegister, dst);
     __ movsd(dst, xmm0);
-    __ movq(src, kScratchRegister);
+    __ movp(src, kScratchRegister);
 
   } else if (source->IsDoubleRegister() && destination->IsDoubleRegister()) {
     // Swap two double registers.
@@ -305,7 +311,7 @@ void LGapResolver::EmitSwap(int index) {
     Operand other_operand = cgen_->ToOperand(other);
     __ movsd(xmm0, other_operand);
     __ movsd(other_operand, reg);
-    __ movsd(reg, xmm0);
+    __ movaps(reg, xmm0);
 
   } else {
     // No other combinations are possible.

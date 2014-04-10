@@ -33,12 +33,26 @@
 
 var $Set = global.Set;
 var $Map = global.Map;
-var $WeakMap = global.WeakMap;
-var $WeakSet = global.WeakSet;
 
 // Global sentinel to be used instead of undefined keys, which are not
 // supported internally but required for Harmony sets and maps.
 var undefined_sentinel = {};
+
+
+// Map and Set uses SameValueZero which means that +0 and -0 should be treated
+// as the same value.
+function NormalizeKey(key) {
+  if (IS_UNDEFINED(key)) {
+    return undefined_sentinel;
+  }
+
+  if (key === 0) {
+    return 0;
+  }
+
+  return key;
+}
+
 
 // -------------------------------------------------------------------
 // Harmony Set
@@ -57,10 +71,7 @@ function SetAdd(key) {
     throw MakeTypeError('incompatible_method_receiver',
                         ['Set.prototype.add', this]);
   }
-  if (IS_UNDEFINED(key)) {
-    key = undefined_sentinel;
-  }
-  return %SetAdd(this, key);
+  return %SetAdd(this, NormalizeKey(key));
 }
 
 
@@ -69,10 +80,7 @@ function SetHas(key) {
     throw MakeTypeError('incompatible_method_receiver',
                         ['Set.prototype.has', this]);
   }
-  if (IS_UNDEFINED(key)) {
-    key = undefined_sentinel;
-  }
-  return %SetHas(this, key);
+  return %SetHas(this, NormalizeKey(key));
 }
 
 
@@ -81,9 +89,7 @@ function SetDelete(key) {
     throw MakeTypeError('incompatible_method_receiver',
                         ['Set.prototype.delete', this]);
   }
-  if (IS_UNDEFINED(key)) {
-    key = undefined_sentinel;
-  }
+  key = NormalizeKey(key);
   if (%SetHas(this, key)) {
     %SetDelete(this, key);
     return true;
@@ -151,10 +157,7 @@ function MapGet(key) {
     throw MakeTypeError('incompatible_method_receiver',
                         ['Map.prototype.get', this]);
   }
-  if (IS_UNDEFINED(key)) {
-    key = undefined_sentinel;
-  }
-  return %MapGet(this, key);
+  return %MapGet(this, NormalizeKey(key));
 }
 
 
@@ -163,10 +166,7 @@ function MapSet(key, value) {
     throw MakeTypeError('incompatible_method_receiver',
                         ['Map.prototype.set', this]);
   }
-  if (IS_UNDEFINED(key)) {
-    key = undefined_sentinel;
-  }
-  return %MapSet(this, key, value);
+  return %MapSet(this, NormalizeKey(key), value);
 }
 
 
@@ -175,10 +175,7 @@ function MapHas(key) {
     throw MakeTypeError('incompatible_method_receiver',
                         ['Map.prototype.has', this]);
   }
-  if (IS_UNDEFINED(key)) {
-    key = undefined_sentinel;
-  }
-  return %MapHas(this, key);
+  return %MapHas(this, NormalizeKey(key));
 }
 
 
@@ -187,10 +184,7 @@ function MapDelete(key) {
     throw MakeTypeError('incompatible_method_receiver',
                         ['Map.prototype.delete', this]);
   }
-  if (IS_UNDEFINED(key)) {
-    key = undefined_sentinel;
-  }
-  return %MapDelete(this, key);
+  return %MapDelete(this, NormalizeKey(key));
 }
 
 
@@ -234,174 +228,3 @@ function SetUpMap() {
 }
 
 SetUpMap();
-
-
-// -------------------------------------------------------------------
-// Harmony WeakMap
-
-function WeakMapConstructor() {
-  if (%_IsConstructCall()) {
-    %WeakCollectionInitialize(this);
-  } else {
-    throw MakeTypeError('constructor_not_function', ['WeakMap']);
-  }
-}
-
-
-function WeakMapGet(key) {
-  if (!IS_WEAKMAP(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakMap.prototype.get', this]);
-  }
-  if (!(IS_SPEC_OBJECT(key) || IS_SYMBOL(key))) {
-    throw %MakeTypeError('invalid_weakmap_key', [this, key]);
-  }
-  return %WeakCollectionGet(this, key);
-}
-
-
-function WeakMapSet(key, value) {
-  if (!IS_WEAKMAP(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakMap.prototype.set', this]);
-  }
-  if (!(IS_SPEC_OBJECT(key) || IS_SYMBOL(key))) {
-    throw %MakeTypeError('invalid_weakmap_key', [this, key]);
-  }
-  return %WeakCollectionSet(this, key, value);
-}
-
-
-function WeakMapHas(key) {
-  if (!IS_WEAKMAP(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakMap.prototype.has', this]);
-  }
-  if (!(IS_SPEC_OBJECT(key) || IS_SYMBOL(key))) {
-    throw %MakeTypeError('invalid_weakmap_key', [this, key]);
-  }
-  return %WeakCollectionHas(this, key);
-}
-
-
-function WeakMapDelete(key) {
-  if (!IS_WEAKMAP(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakMap.prototype.delete', this]);
-  }
-  if (!(IS_SPEC_OBJECT(key) || IS_SYMBOL(key))) {
-    throw %MakeTypeError('invalid_weakmap_key', [this, key]);
-  }
-  return %WeakCollectionDelete(this, key);
-}
-
-
-function WeakMapClear() {
-  if (!IS_WEAKMAP(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakMap.prototype.clear', this]);
-  }
-  // Replace the internal table with a new empty table.
-  %WeakCollectionInitialize(this);
-}
-
-
-// -------------------------------------------------------------------
-
-function SetUpWeakMap() {
-  %CheckIsBootstrapping();
-
-  %SetCode($WeakMap, WeakMapConstructor);
-  %FunctionSetPrototype($WeakMap, new $Object());
-  %SetProperty($WeakMap.prototype, "constructor", $WeakMap, DONT_ENUM);
-
-  // Set up the non-enumerable functions on the WeakMap prototype object.
-  InstallFunctions($WeakMap.prototype, DONT_ENUM, $Array(
-    "get", WeakMapGet,
-    "set", WeakMapSet,
-    "has", WeakMapHas,
-    "delete", WeakMapDelete,
-    "clear", WeakMapClear
-  ));
-}
-
-SetUpWeakMap();
-
-
-// -------------------------------------------------------------------
-// Harmony WeakSet
-
-function WeakSetConstructor() {
-  if (%_IsConstructCall()) {
-    %WeakCollectionInitialize(this);
-  } else {
-    throw MakeTypeError('constructor_not_function', ['WeakSet']);
-  }
-}
-
-
-function WeakSetAdd(value) {
-  if (!IS_WEAKSET(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakSet.prototype.add', this]);
-  }
-  if (!(IS_SPEC_OBJECT(value) || IS_SYMBOL(value))) {
-    throw %MakeTypeError('invalid_weakset_value', [this, value]);
-  }
-  return %WeakCollectionSet(this, value, true);
-}
-
-
-function WeakSetHas(value) {
-  if (!IS_WEAKSET(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakSet.prototype.has', this]);
-  }
-  if (!(IS_SPEC_OBJECT(value) || IS_SYMBOL(value))) {
-    throw %MakeTypeError('invalid_weakset_value', [this, value]);
-  }
-  return %WeakCollectionHas(this, value);
-}
-
-
-function WeakSetDelete(value) {
-  if (!IS_WEAKSET(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakSet.prototype.delete', this]);
-  }
-  if (!(IS_SPEC_OBJECT(value) || IS_SYMBOL(value))) {
-    throw %MakeTypeError('invalid_weakset_value', [this, value]);
-  }
-  return %WeakCollectionDelete(this, value);
-}
-
-
-function WeakSetClear() {
-  if (!IS_WEAKSET(this)) {
-    throw MakeTypeError('incompatible_method_receiver',
-                        ['WeakSet.prototype.clear', this]);
-  }
-  // Replace the internal table with a new empty table.
-  %WeakCollectionInitialize(this);
-}
-
-
-// -------------------------------------------------------------------
-
-function SetUpWeakSet() {
-  %CheckIsBootstrapping();
-
-  %SetCode($WeakSet, WeakSetConstructor);
-  %FunctionSetPrototype($WeakSet, new $Object());
-  %SetProperty($WeakSet.prototype, "constructor", $WeakSet, DONT_ENUM);
-
-  // Set up the non-enumerable functions on the WeakSet prototype object.
-  InstallFunctions($WeakSet.prototype, DONT_ENUM, $Array(
-    "add", WeakSetAdd,
-    "has", WeakSetHas,
-    "delete", WeakSetDelete,
-    "clear", WeakSetClear
-  ));
-}
-
-SetUpWeakSet();

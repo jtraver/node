@@ -44,9 +44,10 @@ extern QUEUE handle_wrap_queue;
 
 
 void HandleWrap::Ref(const FunctionCallbackInfo<Value>& args) {
-  HandleScope scope(node_isolate);
+  Environment* env = Environment::GetCurrent(args.GetIsolate());
+  HandleScope scope(env->isolate());
 
-  HandleWrap* wrap = Unwrap<HandleWrap>(args.This());
+  HandleWrap* wrap = Unwrap<HandleWrap>(args.Holder());
 
   if (wrap != NULL && wrap->handle__ != NULL) {
     uv_ref(wrap->handle__);
@@ -56,9 +57,10 @@ void HandleWrap::Ref(const FunctionCallbackInfo<Value>& args) {
 
 
 void HandleWrap::Unref(const FunctionCallbackInfo<Value>& args) {
-  HandleScope scope(node_isolate);
+  Environment* env = Environment::GetCurrent(args.GetIsolate());
+  HandleScope scope(env->isolate());
 
-  HandleWrap* wrap = Unwrap<HandleWrap>(args.This());
+  HandleWrap* wrap = Unwrap<HandleWrap>(args.Holder());
 
   if (wrap != NULL && wrap->handle__ != NULL) {
     uv_unref(wrap->handle__);
@@ -68,15 +70,15 @@ void HandleWrap::Unref(const FunctionCallbackInfo<Value>& args) {
 
 
 void HandleWrap::Close(const FunctionCallbackInfo<Value>& args) {
-  HandleScope scope(node_isolate);
+  Environment* env = Environment::GetCurrent(args.GetIsolate());
+  HandleScope scope(env->isolate());
 
-  HandleWrap* wrap = Unwrap<HandleWrap>(args.This());
+  HandleWrap* wrap = Unwrap<HandleWrap>(args.Holder());
 
   // guard against uninitialized handle or double close
   if (wrap == NULL || wrap->handle__ == NULL)
     return;
 
-  Environment* env = wrap->env();
   assert(!wrap->persistent().IsEmpty());
   uv_close(wrap->handle__, OnClose);
   wrap->handle__ = NULL;
@@ -90,12 +92,13 @@ void HandleWrap::Close(const FunctionCallbackInfo<Value>& args) {
 
 HandleWrap::HandleWrap(Environment* env,
                        Handle<Object> object,
-                       uv_handle_t* handle)
-    : AsyncWrap(env, object),
+                       uv_handle_t* handle,
+                       AsyncWrap::ProviderType provider)
+    : AsyncWrap(env, object, provider),
       flags_(0),
       handle__(handle) {
   handle__->data = this;
-  HandleScope scope(node_isolate);
+  HandleScope scope(env->isolate());
   Wrap<HandleWrap>(object, this);
   QUEUE_INSERT_TAIL(&handle_wrap_queue, &handle_wrap_queue_);
 }
@@ -110,6 +113,7 @@ HandleWrap::~HandleWrap() {
 void HandleWrap::OnClose(uv_handle_t* handle) {
   HandleWrap* wrap = static_cast<HandleWrap*>(handle->data);
   Environment* env = wrap->env();
+  HandleScope scope(env->isolate());
 
   // The wrap object should still be there.
   assert(wrap->persistent().IsEmpty() == false);
@@ -126,7 +130,7 @@ void HandleWrap::OnClose(uv_handle_t* handle) {
   }
 
   object->SetAlignedPointerInInternalField(0, NULL);
-  wrap->persistent().Dispose();
+  wrap->persistent().Reset();
   delete wrap;
 }
 

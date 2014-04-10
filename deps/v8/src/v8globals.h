@@ -133,6 +133,7 @@ class Heap;
 class HeapObject;
 class IC;
 class InterceptorInfo;
+class Isolate;
 class JSReceiver;
 class JSArray;
 class JSFunction;
@@ -198,6 +199,11 @@ const int kSpaceTagMask = (1 << kSpaceTagSize) - 1;
 // (allocated in the young generation if the object size and type
 // allows).
 enum PretenureFlag { NOT_TENURED, TENURED };
+
+enum MinimumCapacity {
+  USE_DEFAULT_MINIMUM_CAPACITY,
+  USE_CUSTOM_MINIMUM_CAPACITY
+};
 
 enum GarbageCollector { SCAVENGER, MARK_COMPACTOR };
 
@@ -274,22 +280,14 @@ enum InlineCacheState {
 };
 
 
-enum CheckType {
-  RECEIVER_MAP_CHECK,
-  STRING_CHECK,
-  SYMBOL_CHECK,
-  NUMBER_CHECK,
-  BOOLEAN_CHECK
-};
-
-
 enum CallFunctionFlags {
-  NO_CALL_FUNCTION_FLAGS = 0,
-  // Receiver might implicitly be the global objects. If it is, the
-  // hole is passed to the call function stub.
-  RECEIVER_MIGHT_BE_IMPLICIT = 1 << 0,
+  NO_CALL_FUNCTION_FLAGS,
   // The call target is cached in the instruction stream.
-  RECORD_CALL_TARGET = 1 << 1
+  RECORD_CALL_TARGET,
+  CALL_AS_METHOD,
+  // Always wrap the receiver and call to the JSFunction. Only use this flag
+  // both the receiver type and the target method are statically known.
+  WRAP_AND_CALL
 };
 
 
@@ -317,6 +315,9 @@ union DoubleRepresentation {
   double  value;
   int64_t bits;
   DoubleRepresentation(double x) { value = x; }
+  bool operator==(const DoubleRepresentation& other) const {
+    return bits == other.bits;
+  }
 };
 
 
@@ -439,14 +440,6 @@ enum SmiCheckType {
 };
 
 
-// Used to specify whether a receiver is implicitly or explicitly
-// provided to a call.
-enum CallKind {
-  CALL_AS_METHOD,
-  CALL_AS_FUNCTION
-};
-
-
 enum ScopeType {
   EVAL_SCOPE,      // The top-level scope for an eval source.
   FUNCTION_SCOPE,  // The top-level scope for a function.
@@ -473,11 +466,11 @@ enum VariableMode {
   // User declared variables:
   VAR,             // declared via 'var', and 'function' declarations
 
-  CONST,           // declared via 'const' declarations
+  CONST_LEGACY,    // declared via legacy 'const' declarations
 
   LET,             // declared via 'let' declarations (first lexical)
 
-  CONST_HARMONY,   // declared via 'const' declarations in harmony mode
+  CONST,           // declared via 'const' declarations
 
   MODULE,          // declared via 'module' declaration (last lexical)
 
@@ -518,7 +511,7 @@ inline bool IsLexicalVariableMode(VariableMode mode) {
 
 
 inline bool IsImmutableVariableMode(VariableMode mode) {
-  return mode == CONST || (mode >= CONST_HARMONY && mode <= MODULE);
+  return (mode >= CONST && mode <= MODULE) || mode == CONST_LEGACY;
 }
 
 

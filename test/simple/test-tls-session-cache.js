@@ -19,24 +19,20 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-if (!process.versions.openssl) {
-  console.error('Skipping because node compiled without OpenSSL.');
+var common = require('../common');
+
+if (!common.opensslCli) {
+  console.error('Skipping because node compiled without OpenSSL CLI.');
   process.exit(0);
 }
-require('child_process').exec('openssl version', function(err) {
-  if (err !== null) {
-    console.error('Skipping because openssl command is not available.');
-    process.exit(0);
-  }
-  doTest({ tickets: false } , function() {
-    doTest({ tickets: true } , function() {
-      console.error('all done');
-    });
+
+doTest({ tickets: false } , function() {
+  doTest({ tickets: true } , function() {
+    console.error('all done');
   });
 });
 
 function doTest(testOptions, callback) {
-  var common = require('../common');
   var assert = require('assert');
   var tls = require('tls');
   var fs = require('fs');
@@ -56,7 +52,6 @@ function doTest(testOptions, callback) {
   var requestCount = 0;
   var resumeCount = 0;
   var session;
-  var badOpenSSL = false;
 
   var server = tls.createServer(options, function(cleartext) {
     cleartext.on('error', function(er) {
@@ -69,12 +64,16 @@ function doTest(testOptions, callback) {
     ++requestCount;
     cleartext.end();
   });
-  server.on('newSession', function(id, data) {
-    assert.ok(!session);
-    session = {
-      id: id,
-      data: data
-    };
+  server.on('newSession', function(id, data, cb) {
+    // Emulate asynchronous store
+    setTimeout(function() {
+      assert.ok(!session);
+      session = {
+        id: id,
+        data: data
+      };
+      cb();
+    }, 1000);
   });
   server.on('resumeSession', function(id, callback) {
     ++resumeCount;
@@ -87,10 +86,11 @@ function doTest(testOptions, callback) {
     }, 100);
   });
   server.listen(common.PORT, function() {
-    var client = spawn('openssl', [
+    var client = spawn(common.opensslCli, [
       's_client',
       '-tls1',
       '-connect', 'localhost:' + common.PORT,
+      '-servername', 'ohgod',
       '-key', join(common.fixturesDir, 'agent.key'),
       '-cert', join(common.fixturesDir, 'agent.crt'),
       '-reconnect'
@@ -104,12 +104,7 @@ function doTest(testOptions, callback) {
     });
     client.on('exit', function(code) {
       console.error('done');
-      if (/^unknown option/.test(err)) {
-        // using an incompatible version of openssl
-        assert(code);
-        badOpenSSL = true;
-      } else
-        assert.equal(code, 0);
+      assert.equal(code, 0);
       server.close(function() {
         setTimeout(callback, 100);
       });
@@ -117,16 +112,14 @@ function doTest(testOptions, callback) {
   });
 
   process.on('exit', function() {
-    if (!badOpenSSL) {
-      if (testOptions.tickets) {
-        assert.equal(requestCount, 6);
-        assert.equal(resumeCount, 0);
-      } else {
-        // initial request + reconnect requests (5 times)
-        assert.ok(session);
-        assert.equal(requestCount, 6);
-        assert.equal(resumeCount, 5);
-      }
+    if (testOptions.tickets) {
+      assert.equal(requestCount, 6);
+      assert.equal(resumeCount, 0);
+    } else {
+      // initial request + reconnect requests (5 times)
+      assert.ok(session);
+      assert.equal(requestCount, 6);
+      assert.equal(resumeCount, 5);
     }
   });
 }

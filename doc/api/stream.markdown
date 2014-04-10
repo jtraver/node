@@ -575,7 +575,7 @@ for (var i = 0; i < 100; i ++) {
   writer.write('hello, #' + i + '!\n');
 }
 writer.end('this is the end\n');
-write.on('finish', function() {
+writer.on('finish', function() {
   console.error('all writes are now complete.');
 });
 ```
@@ -614,6 +614,10 @@ writer.on('unpipe', function(src) {
 reader.pipe(writer);
 reader.unpipe(writer);
 ```
+
+#### Event: 'error'
+
+Emitted if there was an error when writing or piping data.
 
 ### Class: stream.Duplex
 
@@ -785,7 +789,7 @@ util.inherits(SimpleProtocol, Readable);
 
 function SimpleProtocol(source, options) {
   if (!(this instanceof SimpleProtocol))
-    return new SimpleProtocol(options);
+    return new SimpleProtocol(source, options);
 
   Readable.call(this, options);
   this._inBody = false;
@@ -995,6 +999,9 @@ how to implement Writable streams in your programs.
     returning false. Default=16kb, or 16 for `objectMode` streams
   * `decodeStrings` {Boolean} Whether or not to decode strings into
     Buffers before passing them to [`_write()`][].  Default=true
+  * `objectMode` {Boolean} Whether or not the `write(anyObj)` is
+    a valid operation. If set you can write arbitrary data instead
+    of only `Buffer` / `String` data.  Default=false
 
 In classes that extend the Writable class, make sure to call the
 constructor so that the buffering settings can be properly

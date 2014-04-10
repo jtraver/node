@@ -42,6 +42,13 @@ var serverOptions = {
   key: loadPEM('agent2-key'),
   cert: loadPEM('agent2-cert'),
   crl: loadPEM('ca2-crl'),
+  SNICallback: function(servername, cb) {
+    cb(null, tls.createSecureContext({
+      key: loadPEM('agent2-key'),
+      cert: loadPEM('agent2-cert'),
+      crl: loadPEM('ca2-crl'),
+    }));
+  },
   NPNProtocols: ['a', 'b', 'c']
 };
 

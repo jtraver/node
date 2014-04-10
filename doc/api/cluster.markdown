@@ -121,6 +121,8 @@ values are `"rr"` and `"none"`.
 ## cluster.settings
 
 * {Object}
+  * `execArgv` {Array} list of string arguments passed to the node executable. 
+    (Default=`process.execArgv`)
   * `exec` {String} file path to worker file.  (Default=`process.argv[1]`)
   * `args` {Array} string arguments passed to worker.
     (Default=`process.argv.slice(2)`)
@@ -154,7 +156,7 @@ True if the process is not a master (it is the negation of `cluster.isMaster`).
 * `worker` {Worker object}
 
 When a new worker is forked the cluster module will emit a 'fork' event.
-This can be used to log worker activity, and create you own timeout.
+This can be used to log worker activity, and create your own timeout.
 
     var timeouts = [];
     function errorMsg() {

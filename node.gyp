@@ -1,9 +1,6 @@
 {
   'variables': {
     'v8_use_snapshot%': 'true',
-    # Turn off -Werror in V8
-    # See http://codereview.chromium.org/8159015
-    'werror': '',
     'node_use_dtrace%': 'false',
     'node_use_etw%': 'false',
     'node_use_perfctr%': 'false',
@@ -16,6 +13,7 @@
     'node_use_openssl%': 'true',
     'node_shared_openssl%': 'false',
     'node_use_mdb%': 'false',
+    'node_v8_options%': '',
     'library_files': [
       'src/node.js',
       'lib/_debugger.js',
@@ -59,7 +57,9 @@
       'lib/string_decoder.js',
       'lib/sys.js',
       'lib/timers.js',
+      'lib/tracing.js',
       'lib/tls.js',
+      'lib/_tls_common.js',
       'lib/_tls_legacy.js',
       'lib/_tls_wrap.js',
       'lib/tty.js',
@@ -94,18 +94,19 @@
         'src/node_buffer.cc',
         'src/node_constants.cc',
         'src/node_contextify.cc',
-        'src/node_extensions.cc',
         'src/node_file.cc',
         'src/node_http_parser.cc',
         'src/node_javascript.cc',
         'src/node_main.cc',
         'src/node_os.cc',
+        'src/node_v8.cc',
         'src/node_stat_watcher.cc',
         'src/node_watchdog.cc',
         'src/node_zlib.cc',
         'src/pipe_wrap.cc',
         'src/signal_wrap.cc',
         'src/smalloc.cc',
+        'src/spawn_sync.cc',
         'src/string_bytes.cc',
         'src/stream_wrap.cc',
         'src/tcp_wrap.cc',
@@ -126,7 +127,6 @@
         'src/node_buffer.h',
         'src/node_constants.h',
         'src/node_contextify.h',
-        'src/node_extensions.h',
         'src/node_file.h',
         'src/node_http_parser.h',
         'src/node_internals.h',
@@ -160,6 +160,7 @@
         'ARCH="<(target_arch)"',
         'PLATFORM="<(OS)"',
         'NODE_TAG="<(node_tag)"',
+        'NODE_V8_OPTIONS="<(node_v8_options)"',
       ],
 
       'conditions': [
@@ -177,15 +178,24 @@
           ],
           'conditions': [
             [ 'node_shared_openssl=="false"', {
-              'dependencies': [ './deps/openssl/openssl.gyp:openssl' ],
+              'dependencies': [
+                './deps/openssl/openssl.gyp:openssl',
+
+                # For tests
+                './deps/openssl/openssl.gyp:openssl-cli'
+              ],
             }]]
         }, {
           'defines': [ 'HAVE_OPENSSL=0' ]
         }],
         [ 'node_use_dtrace=="true"', {
           'defines': [ 'HAVE_DTRACE=1' ],
-          'dependencies': [ 'node_dtrace_header' ],
+          'dependencies': [
+            'node_dtrace_header',
+            'specialize_node_d',
+          ],
           'include_dirs': [ '<(SHARED_INTERMEDIATE_DIR)' ],
+
           #
           # DTrace is supported on linux, solaris, mac, and bsd.  There are
           # three object files associated with DTrace support, but they're
@@ -318,6 +328,12 @@
             # rather than gyp's preferred "solaris"
             'PLATFORM="sunos"',
           ],
+        }],
+        [
+          'OS=="linux" and node_shared_v8=="false"', {
+            'ldflags': [
+              '-Wl,--whole-archive <(V8_BASE) -Wl,--no-whole-archive',
+            ],
         }],
       ],
       'msvs_settings': {
@@ -454,11 +470,11 @@
             {
               'action_name': 'node_dtrace_provider_o',
               'inputs': [
-                '<(PRODUCT_DIR)/obj.target/libuv/deps/uv/src/unix/core.o',
-                '<(PRODUCT_DIR)/obj.target/node/src/node_dtrace.o',
+                '<(OBJ_DIR)/libuv/deps/uv/src/unix/core.o',
+                '<(OBJ_DIR)/node/src/node_dtrace.o',
               ],
               'outputs': [
-                '<(PRODUCT_DIR)/obj.target/node/src/node_dtrace_provider.o'
+                '<(OBJ_DIR)/node/src/node_dtrace_provider.o'
               ],
               'action': [ 'dtrace', '-G', '-xnolibs', '-s', 'src/node_provider.d',
                 '-s', 'deps/uv/src/unix/uv-dtrace.d', '<@(_inputs)',
@@ -501,7 +517,7 @@
             {
               'action_name': 'node_dtrace_ustack_constants',
               'inputs': [
-                '<(PRODUCT_DIR)/obj.target/deps/v8/tools/gyp/libv8_base.<(target_arch).a'
+                '<(V8_BASE)'
               ],
               'outputs': [
                 '<(SHARED_INTERMEDIATE_DIR)/v8constants.h'
@@ -519,7 +535,7 @@
                 '<(SHARED_INTERMEDIATE_DIR)/v8constants.h'
               ],
               'outputs': [
-                '<(PRODUCT_DIR)/obj.target/node/src/node_dtrace_ustack.o'
+                '<(OBJ_DIR)/node/src/node_dtrace_ustack.o'
               ],
               'conditions': [
                 [ 'target_arch=="ia32"', {
@@ -535,8 +551,34 @@
                   ]
                 } ],
               ]
-            }
+            },
           ]
+        } ],
+      ]
+    },
+    {
+      'target_name': 'specialize_node_d',
+      'type': 'none',
+      'conditions': [
+        [ 'node_use_dtrace=="true"', {
+          'actions': [
+            {
+              'action_name': 'specialize_node_d',
+              'inputs': [
+                'src/node.d'
+              ],
+              'outputs': [
+                '<(PRODUCT_DIR)/node.d',
+              ],
+              'action': [
+                'tools/specialize_node_d.py',
+                '<@(_outputs)',
+                '<@(_inputs)',
+                '<@(OS)',
+                '<@(target_arch)',
+              ],
+            },
+          ],
         } ],
       ]
     }

@@ -44,7 +44,7 @@
 #ifndef V8_PLATFORM_H_
 #define V8_PLATFORM_H_
 
-#include <cstdarg>
+#include <stdarg.h>
 
 #include "platform/mutex.h"
 #include "platform/semaphore.h"
@@ -59,8 +59,12 @@ int signbit(double x);
 # endif
 #endif
 
+#if V8_OS_QNX
+#include "qnx-math.h"
+#endif
+
 // Microsoft Visual C++ specific stuff.
-#if V8_CC_MSVC
+#if V8_LIBC_MSVCRT
 
 #include "win32-headers.h"
 #include "win32-math.h"
@@ -85,22 +89,16 @@ inline int lrint(double flt) {
 #endif
   return intgr;
 }
-
 #endif  // _MSC_VER < 1800
 
-#endif  // V8_CC_MSVC
+#endif  // V8_LIBC_MSVCRT
 
 namespace v8 {
 namespace internal {
 
-double ceiling(double x);
 double modulo(double x, double y);
 
 // Custom implementation of math functions.
-double fast_sin(double input);
-double fast_cos(double input);
-double fast_tan(double input);
-double fast_log(double input);
 double fast_exp(double input);
 double fast_sqrt(double input);
 // The custom exp implementation needs 16KB of lookup data; initialize it
@@ -161,6 +159,9 @@ inline intptr_t InternalGetExistingThreadLocal(intptr_t index) {
 #endif  // V8_NO_FAST_TLS
 
 
+class TimezoneCache;
+
+
 // ----------------------------------------------------------------------------
 // OS
 //
@@ -184,16 +185,20 @@ class OS {
   // 00:00:00 UTC, January 1, 1970.
   static double TimeCurrentMillis();
 
+  static TimezoneCache* CreateTimezoneCache();
+  static void DisposeTimezoneCache(TimezoneCache* cache);
+  static void ClearTimezoneCache(TimezoneCache* cache);
+
   // Returns a string identifying the current time zone. The
   // timestamp is used for determining if DST is in effect.
-  static const char* LocalTimezone(double time);
+  static const char* LocalTimezone(double time, TimezoneCache* cache);
 
   // Returns the local time offset in milliseconds east of UTC without
   // taking daylight savings time into account.
-  static double LocalTimeOffset();
+  static double LocalTimeOffset(TimezoneCache* cache);
 
   // Returns the daylight savings offset for the given time.
-  static double DaylightSavingsOffset(double time);
+  static double DaylightSavingsOffset(double time, TimezoneCache* cache);
 
   // Returns last OS error.
   static int GetLastError();
@@ -368,6 +373,26 @@ class OS {
                                  const uint8_t* src,
                                  size_t size) {
     (*memcopy_uint16_uint8_function)(dest, src, size);
+  }
+#elif defined(V8_HOST_ARCH_MIPS)
+  typedef void (*MemCopyUint8Function)(uint8_t* dest,
+                                       const uint8_t* src,
+                                       size_t size);
+  static MemCopyUint8Function memcopy_uint8_function;
+  static void MemCopyUint8Wrapper(uint8_t* dest,
+                                  const uint8_t* src,
+                                  size_t chars) {
+    memcpy(dest, src, chars);
+  }
+  // For values < 16, the assembler function is slower than the inlined C code.
+  static const int kMinComplexMemCopy = 16;
+  static void MemCopy(void* dest, const void* src, size_t size) {
+    (*memcopy_uint8_function)(reinterpret_cast<uint8_t*>(dest),
+                              reinterpret_cast<const uint8_t*>(src),
+                              size);
+  }
+  static void MemMove(void* dest, const void* src, size_t size) {
+    memmove(dest, src, size);
   }
 #else
   // Copy memory area to disjoint memory area.

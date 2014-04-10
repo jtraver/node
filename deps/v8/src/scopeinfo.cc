@@ -32,8 +32,6 @@
 #include "scopeinfo.h"
 #include "scopes.h"
 
-#include "allocation-inl.h"
-
 namespace v8 {
 namespace internal {
 
@@ -80,7 +78,7 @@ Handle<ScopeInfo> ScopeInfo::Create(Scope* scope, Zone* zone) {
   // Encode the flags.
   int flags = ScopeTypeField::encode(scope->scope_type()) |
       CallsEvalField::encode(scope->calls_eval()) |
-      LanguageModeField::encode(scope->language_mode()) |
+      StrictModeField::encode(scope->strict_mode()) |
       FunctionVariableField::encode(function_name_info) |
       FunctionVariableMode::encode(function_variable_mode);
   scope_info->SetFlags(flags);
@@ -166,8 +164,8 @@ bool ScopeInfo::CallsEval() {
 }
 
 
-LanguageMode ScopeInfo::language_mode() {
-  return length() > 0 ? LanguageModeField::decode(Flags()) : CLASSIC_MODE;
+StrictMode ScopeInfo::strict_mode() {
+  return length() > 0 ? StrictModeField::decode(Flags()) : SLOPPY;
 }
 
 
@@ -374,15 +372,14 @@ bool ScopeInfo::CopyContextLocalsToScopeObject(Handle<ScopeInfo> scope_info,
   int end = start + local_count;
   for (int i = start; i < end; ++i) {
     int context_index = Context::MIN_CONTEXT_SLOTS + i - start;
-    RETURN_IF_EMPTY_HANDLE_VALUE(
+    Handle<Object> result = Runtime::SetObjectProperty(
         isolate,
-        SetProperty(isolate,
-                    scope_object,
-                    Handle<String>(String::cast(scope_info->get(i))),
-                    Handle<Object>(context->get(context_index), isolate),
-                    ::NONE,
-                    kNonStrictMode),
-        false);
+        scope_object,
+        Handle<String>(String::cast(scope_info->get(i))),
+        Handle<Object>(context->get(context_index), isolate),
+        ::NONE,
+        SLOPPY);
+    RETURN_IF_EMPTY_HANDLE_VALUE(isolate, result, false);
   }
   return true;
 }

@@ -25,8 +25,8 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Platform specific code for Solaris 10 goes here. For the POSIX comaptible
-// parts the implementation is in platform-posix.cc.
+// Platform-specific code for Solaris 10 goes here. For the POSIX-compatible
+// parts, the implementation is in platform-posix.cc.
 
 #ifdef __sparc
 # error "V8 does not support the SPARC CPU architecture."
@@ -80,16 +80,16 @@ namespace v8 {
 namespace internal {
 
 
-const char* OS::LocalTimezone(double time) {
+const char* OS::LocalTimezone(double time, TimezoneCache* cache) {
   if (std::isnan(time)) return "";
-  time_t tv = static_cast<time_t>(floor(time/msPerSecond));
+  time_t tv = static_cast<time_t>(std::floor(time/msPerSecond));
   struct tm* t = localtime(&tv);
   if (NULL == t) return "";
   return tzname[0];  // The location of the timezone string on Solaris.
 }
 
 
-double OS::LocalTimeOffset() {
+double OS::LocalTimeOffset(TimezoneCache* cache) {
   tzset();
   return -static_cast<double>(timezone * msPerSecond);
 }

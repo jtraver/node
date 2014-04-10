@@ -73,6 +73,7 @@ class SourceCodeCache BASE_EMBEDDED {
     cache_->CopyTo(0, *new_array, 0, cache_->length());
     cache_ = *new_array;
     Handle<String> str = factory->NewStringFromAscii(name, TENURED);
+    ASSERT(!str.is_null());
     cache_->set(length, *str);
     cache_->set(length + 1, *shared);
     Script::cast(shared->script())->set_type(Smi::FromInt(type_));
@@ -90,6 +91,7 @@ class SourceCodeCache BASE_EMBEDDED {
 class Bootstrapper {
  public:
   static void InitializeOncePerProcess();
+  static void TearDownExtensions();
 
   // Requires: Heap::SetUp has been called.
   void Initialize(bool create_heap_objects);
@@ -104,9 +106,6 @@ class Bootstrapper {
 
   // Detach the environment from its outer global object.
   void DetachGlobal(Handle<Context> env);
-
-  // Reattach an outer global object to an environment.
-  void ReattachGlobal(Handle<Context> env, Handle<JSGlobalProxy> global_proxy);
 
   // Traverses the pointers for memory management.
   void Iterate(ObjectVisitor* v);
@@ -148,6 +147,12 @@ class Bootstrapper {
   friend class NativesExternalStringResource;
 
   explicit Bootstrapper(Isolate* isolate);
+
+  static v8::Extension* free_buffer_extension_;
+  static v8::Extension* gc_extension_;
+  static v8::Extension* externalize_string_extension_;
+  static v8::Extension* statistics_extension_;
+  static v8::Extension* trigger_failure_extension_;
 
   DISALLOW_COPY_AND_ASSIGN(Bootstrapper);
 };

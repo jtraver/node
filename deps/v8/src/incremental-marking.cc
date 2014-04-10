@@ -83,28 +83,6 @@ void IncrementalMarking::RecordWriteFromCode(HeapObject* obj,
                                              Isolate* isolate) {
   ASSERT(obj->IsHeapObject());
   IncrementalMarking* marking = isolate->heap()->incremental_marking();
-  ASSERT(!marking->is_compacting_);
-
-  MemoryChunk* chunk = MemoryChunk::FromAddress(obj->address());
-  int counter = chunk->write_barrier_counter();
-  if (counter < (MemoryChunk::kWriteBarrierCounterGranularity / 2)) {
-    marking->write_barriers_invoked_since_last_step_ +=
-        MemoryChunk::kWriteBarrierCounterGranularity -
-            chunk->write_barrier_counter();
-    chunk->set_write_barrier_counter(
-        MemoryChunk::kWriteBarrierCounterGranularity);
-  }
-
-  marking->RecordWrite(obj, slot, *slot);
-}
-
-
-void IncrementalMarking::RecordWriteForEvacuationFromCode(HeapObject* obj,
-                                                          Object** slot,
-                                                          Isolate* isolate) {
-  ASSERT(obj->IsHeapObject());
-  IncrementalMarking* marking = isolate->heap()->incremental_marking();
-  ASSERT(marking->is_compacting_);
 
   MemoryChunk* chunk = MemoryChunk::FromAddress(obj->address());
   int counter = chunk->write_barrier_counter();
@@ -498,12 +476,10 @@ bool IncrementalMarking::WorthActivating() {
   // debug tests run with incremental marking and some without.
   static const intptr_t kActivationThreshold = 0;
 #endif
-  // Only start incremental marking in a safe state: 1) when expose GC is
-  // deactivated, 2) when incremental marking is turned on, 3) when we are
-  // currently not in a GC, and 4) when we are currently not serializing
-  // or deserializing the heap.
-  return !FLAG_expose_gc &&
-      FLAG_incremental_marking &&
+  // Only start incremental marking in a safe state: 1) when incremental
+  // marking is turned on, 2) when we are currently not in a GC, and
+  // 3) when we are currently not serializing or deserializing the heap.
+  return FLAG_incremental_marking &&
       FLAG_incremental_marking_steps &&
       heap_->gc_state() == Heap::NOT_IN_GC &&
       !Serializer::enabled() &&
